@@ -25,10 +25,9 @@ data/models/
 data/images/*
 !data/images/.gitkeep
 
-# ── ルールブック PDF（著作物・大容量） ───────────────────────────────────────
-data/rulebook/*.pdf
-data/rulebook/*.PDF
-# Markdown 変換版は追跡対象（!data/rulebook/*.md は不要、デフォルトで含まれる）
+# ── ルールブック（著作物・push禁止） ────────────────────────────────────────
+# PDF・Markdown ともにグループSNE/富士見書房の著作物のため除外
+data/rulebook/*
 
 # ── コンパイル済みバイナリ ────────────────────────────────────────────────────
 .bin/
