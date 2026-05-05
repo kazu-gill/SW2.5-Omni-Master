@@ -1,0 +1,49 @@
+title = "SW2.5 Omni-Master — Gitleaks Config"
+
+[extend]
+useDefault = true
+
+# ── カスタムルール ────────────────────────────────────────────────────────────
+
+[[rules]]
+id = "hardcoded-unix-homedir"
+description = "Hardcoded Unix home directory path"
+regex = '''/(?:Users|home)/[a-zA-Z][a-zA-Z0-9._-]+/'''
+tags = ["path", "private"]
+
+[[rules]]
+id = "hardcoded-windows-homedir"
+description = "Hardcoded Windows home directory path"
+regex = '''[Cc]:\\[Uu]sers\\[a-zA-Z]'''
+tags = ["path", "private"]
+
+[[rules]]
+id = "private-ip-hardcoded"
+description = "Private IP address hardcoded in source"
+regex = '''(?:192\.168|10\.\d{1,3}|172\.(?:1[6-9]|2\d|3[01]))\.\d{1,3}\.\d{1,3}'''
+tags = ["network", "private"]
+
+# ── 許可リスト ────────────────────────────────────────────────────────────────
+
+[allowlist]
+description = "Known-safe patterns"
+
+# プレースホルダー・汎用例示はOK
+regexes = [
+    '''<[A-Z][A-Z0-9_-]+>''',
+    '''example\.com''',
+    '''localhost''',
+    '''127\.0\.0\.1''',
+    # ドキュメント内の example IP（192.168.x.x）は文脈で判断するがパス除外で対処
+]
+
+# ドキュメント・設定サンプルは除外
+paths = [
+    '''\.example$''',
+    '''docs/''',
+    '''\.md$''',
+    '''CLAUDE\.md''',
+    '''progress\.md''',
+    '''sw25_ui_mock\.html''',
+    '''\.gitignore''',
+]
