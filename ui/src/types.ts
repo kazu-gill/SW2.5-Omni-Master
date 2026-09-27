@@ -28,6 +28,10 @@ export interface TurnResult {
   deltas: ResourceDelta[]
   formation_changes?: FormationChange[]
   image_url?: string
+  /** LLM calls per stage ("gm", "npc:<name>", "support"); more than 1 means it was re-thought */
+  stage_attempts?: Record<string, number>
+  /** Stages that never validated and were skipped or fell back */
+  warnings?: string[]
 }
 
 export interface NPCSheet {
