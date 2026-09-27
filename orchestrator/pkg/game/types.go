@@ -50,4 +50,9 @@ type TurnResult struct {
 	Deltas           []ResourceDelta   `json:"deltas"`
 	FormationChanges []FormationChange `json:"formation_changes,omitempty"`
 	ImageURL         string            `json:"image_url,omitempty"`
+	// StageAttempts counts LLM calls per stage ("gm", "npc:<name>", "support");
+	// more than 1 means the stage was re-thought.
+	StageAttempts map[string]int `json:"stage_attempts,omitempty"`
+	// Warnings lists stages that never validated and were skipped or fell back.
+	Warnings []string `json:"warnings,omitempty"`
 }

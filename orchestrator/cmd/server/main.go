@@ -1,10 +1,12 @@
 package main
 
 import (
+	"fmt"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/api"
 	"github.com/kf/sw25-omni-master/pkg/config"
@@ -44,14 +46,13 @@ func main() {
 		log.Printf("warn: seed quests: %v", err)
 	}
 
-	pool := game.LLMPool{
-		GM:      llm.New(cfg.GMURL),
-		NPCs:    [3]*llm.Client{llm.New(cfg.NPCAURL), llm.New(cfg.NPCBURL), llm.New(cfg.NPCCURL)},
-		Support: llm.New(cfg.SupportURL),
-	}
-	ragEngine := rag.New(database, llm.New(cfg.EmbedURL))
+	checkMlxServe(cfg.LLMURL, cfg.LLMModelID)
+	checkMlxServe(cfg.EmbedURL, cfg.EmbedModelID)
+
+	chat := llm.New(cfg.LLMURL, cfg.LLMModelID, cfg.LLMTimeout)
+	ragEngine := rag.New(database, llm.New(cfg.EmbedURL, cfg.EmbedModelID, cfg.LLMTimeout))
 	comfy := game.NewComfyUIClient(cfg.ComfyURL) // nil if COMFY_URL is empty
-	engine := game.NewEngine(database, pool, ragEngine)
+	engine := game.NewEngine(database, chat, ragEngine, cfg.StageRetryLimit)
 
 	handler := api.New(database, engine, comfy, cfg.PersonasDir)
 	mux := http.NewServeMux()
@@ -63,4 +64,22 @@ func main() {
 	}
 	log.Printf("Omni-Master listening on %s  (ComfyUI: %s)", cfg.Addr, comfyStatus)
 	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
+}
+
+// checkMlxServe warns when an mlx-serve profile is not answering. The server
+// still starts: Omni-Master never launches models itself, and the profile may
+// be started later.
+func checkMlxServe(baseURL, modelID string) {
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get(baseURL + "/health")
+	if err == nil {
+		resp.Body.Close()
+		if resp.StatusCode == http.StatusOK {
+			log.Printf("mlx-serve %s: ready (%s)", modelID, baseURL)
+			return
+		}
+		err = fmt.Errorf("status %d", resp.StatusCode)
+	}
+	log.Printf("warn: mlx-serve %s is not ready at %s (%v)", modelID, baseURL, err)
+	log.Printf("      start it: pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile %s", modelID)
 }

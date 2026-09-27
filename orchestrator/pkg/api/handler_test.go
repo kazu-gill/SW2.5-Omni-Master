@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,18 +18,32 @@ import (
 	"nhooyr.io/websocket/wsjson"
 )
 
-func mockLLMSrv(reply string) *httptest.Server {
+// mockLLMSrv answers every turn stage from one endpoint, choosing the reply
+// by the stage's system prompt.
+func mockLLMSrv(gm, npc, support string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		switch r.URL.Path {
-		case "/embedding":
-			json.NewEncoder(w).Encode(map[string]any{"embedding": []float32{1, 0, 0}})
-		default:
+		if r.URL.Path == "/v1/embeddings" {
 			json.NewEncoder(w).Encode(map[string]any{
-				"choices": []map[string]any{
-					{"message": map[string]string{"role": "assistant", "content": reply}},
-				},
+				"data": []map[string]any{{"embedding": []float32{1, 0, 0}}},
 			})
+			return
 		}
+		var req struct {
+			Messages []llm.Message `json:"messages"`
+		}
+		json.NewDecoder(r.Body).Decode(&req)
+		reply := gm
+		switch system := req.Messages[0].Content; {
+		case strings.Contains(system, "あなたはNPC"):
+			reply = npc
+		case strings.Contains(system, "数値計算担当"):
+			reply = support
+		}
+		json.NewEncoder(w).Encode(map[string]any{
+			"choices": []map[string]any{
+				{"message": map[string]string{"role": "assistant", "content": reply}, "finish_reason": "stop"},
+			},
+		})
 	}))
 }
 
@@ -42,18 +57,12 @@ func setupHandler(t *testing.T) (*Handler, *httptest.Server, int64) {
 	t.Cleanup(func() { database.Close() })
 
 	npcYAML := "name: ガルド\naction: 待機\ndialogue: 様子を見る\nmp_cost: 0\nhp_delta: 0"
-	gmSrv := mockLLMSrv("GMが状況を描写します。")
-	npcSrv := mockLLMSrv(npcYAML)
-	supportSrv := mockLLMSrv(`[{"npc_name":"ガルド","hp_delta":0,"mp_cost":0}]`)
-	t.Cleanup(func() { gmSrv.Close(); npcSrv.Close(); supportSrv.Close() })
+	llmSrv := mockLLMSrv("GMが状況を描写します。", npcYAML, `[{"npc_name":"ガルド","hp_delta":0,"mp_cost":0}]`)
+	t.Cleanup(llmSrv.Close)
 
-	pool := game.LLMPool{
-		GM:      llm.New(gmSrv.URL),
-		NPCs:    [3]*llm.Client{llm.New(npcSrv.URL), llm.New(npcSrv.URL), llm.New(npcSrv.URL)},
-		Support: llm.New(supportSrv.URL),
-	}
-	ragEngine := rag.New(database, llm.New(gmSrv.URL))
-	engine := game.NewEngine(database, pool, ragEngine)
+	chat := llm.New(llmSrv.URL, "test-model", 5*time.Second)
+	ragEngine := rag.New(database, llm.New(llmSrv.URL, "test-embed", 5*time.Second))
+	engine := game.NewEngine(database, chat, ragEngine, 2)
 
 	session, _ := db.CreateSession(database, "test")
 	_ = db.UpsertNPCSheet(database, db.NPCSheet{SessionID: session.ID, Name: "ガルド", HP: 30, MP: 10})

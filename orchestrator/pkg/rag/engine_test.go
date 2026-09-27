@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/llm"
@@ -22,18 +23,20 @@ func setupTest(t *testing.T) (*Engine, *sql.DB) {
 
 	// Mock embed server: returns a fixed vector based on content length
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		var req struct{ Content string }
+		var req struct{ Input string }
 		json.NewDecoder(r.Body).Decode(&req)
 		// Simple deterministic vector: [1,0,0] for "rulebook", [0,1,0] for others
 		vec := []float32{1, 0, 0}
-		if req.Content != "ルール本文テスト" {
+		if req.Input != "ルール本文テスト" {
 			vec = []float32{0, 1, 0}
 		}
-		json.NewEncoder(w).Encode(map[string]any{"embedding": vec})
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{{"embedding": vec}},
+		})
 	}))
 	t.Cleanup(srv.Close)
 
-	client := llm.New(srv.URL)
+	client := llm.New(srv.URL, "test-embed", 5*time.Second)
 	engine := New(database, client)
 	return engine, database
 }

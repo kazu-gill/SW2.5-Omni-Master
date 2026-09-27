@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // Config holds all runtime configuration loaded from config.env.
@@ -12,13 +14,18 @@ type Config struct {
 	DBPath      string
 	Addr        string
 	ComfyURL    string
-	GMURL       string
-	SupportURL  string
-	NPCAURL     string
-	NPCBURL     string
-	NPCCURL     string
-	EmbedURL    string
 	PersonasDir string
+
+	// All turn stages (GM / NPC / Support) share one chat model on mlx-serve.
+	LLMURL     string
+	LLMModelID string
+	LLMTimeout time.Duration
+	// StageRetryLimit is how many times a stage is re-thought after its
+	// output fails validation.
+	StageRetryLimit int
+
+	EmbedURL     string
+	EmbedModelID string
 }
 
 // Load reads config.env at envPath, then overrides with any OS environment
@@ -40,17 +47,34 @@ func Load(envPath string) (*Config, error) {
 		return fallback
 	}
 
+	getInt := func(key string, fallback int) (int, error) {
+		v := get(key, strconv.Itoa(fallback))
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return 0, fmt.Errorf("config.Load: %s=%q は 0 以上の整数で指定してください", key, v)
+		}
+		return n, nil
+	}
+	timeoutSec, err := getInt("LLM_TIMEOUT_SEC", 300)
+	if err != nil {
+		return nil, err
+	}
+	retryLimit, err := getInt("STAGE_RETRY_LIMIT", 2)
+	if err != nil {
+		return nil, err
+	}
+
 	return &Config{
-		DBPath:      get("DB_PATH", "data/omni.db"),
-		Addr:        get("ADDR", ":8080"),
-		ComfyURL:    get("COMFY_URL", ""),
-		GMURL:       get("GM_URL", "http://localhost:11430"),
-		SupportURL:  get("SUPPORT_URL", "http://localhost:11431"),
-		NPCAURL:     get("NPC_A_URL", "http://localhost:11432"),
-		NPCBURL:     get("NPC_B_URL", "http://localhost:11433"),
-		NPCCURL:     get("NPC_C_URL", "http://localhost:11434"),
-		EmbedURL:    get("EMBED_URL", "http://localhost:11435"),
-		PersonasDir: get("PERSONAS_DIR", "data/personas"),
+		DBPath:          get("DB_PATH", "data/omni.db"),
+		Addr:            get("ADDR", ":8080"),
+		ComfyURL:        get("COMFY_URL", ""),
+		PersonasDir:     get("PERSONAS_DIR", "data/personas"),
+		LLMURL:          get("LLM_URL", "http://127.0.0.1:11441"),
+		LLMModelID:      get("LLM_MODEL_ID", "gemma4-31b-it-heretic-4bit-mtp"),
+		LLMTimeout:      time.Duration(timeoutSec) * time.Second,
+		StageRetryLimit: retryLimit,
+		EmbedURL:        get("EMBED_URL", "http://127.0.0.1:11455"),
+		EmbedModelID:    get("EMBED_MODEL_ID", "bge-m3-q8"),
 	}, nil
 }
 

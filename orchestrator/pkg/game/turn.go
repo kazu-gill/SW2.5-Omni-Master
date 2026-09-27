@@ -4,41 +4,36 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
-	"sync"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/llm"
 	"github.com/kf/sw25-omni-master/pkg/rag"
 )
 
-const npcRetryLimit = 2
-
-// LLMPool holds the llama-server clients for each agent role.
-type LLMPool struct {
-	GM      *llm.Client
-	NPCs    [3]*llm.Client // ports 11432-11434
-	Support *llm.Client
-}
-
-// Engine orchestrates a full TRPG turn.
+// Engine orchestrates a full TRPG turn. Every stage runs on the same chat
+// model, one call at a time.
 type Engine struct {
-	db   *sql.DB
-	pool LLMPool
-	rag  *rag.Engine
+	db         *sql.DB
+	llm        ChatModel
+	rag        *rag.Engine
+	retryLimit int // re-think attempts per stage after the first answer
 }
 
-func NewEngine(database *sql.DB, pool LLMPool, ragEngine *rag.Engine) *Engine {
-	return &Engine{db: database, pool: pool, rag: ragEngine}
+func NewEngine(database *sql.DB, chat ChatModel, ragEngine *rag.Engine, retryLimit int) *Engine {
+	return &Engine{db: database, llm: chat, rag: ragEngine, retryLimit: retryLimit}
 }
 
 // ProcessTurn executes one full game turn:
 //  1. Save checkpoint
 //  2. GM narration (with RAG context)
-//  3. Parallel NPC action broadcast
+//  3. NPC actions, one NPC after another
 //  4. Support LM resource calculation
 //  5. DB update
+//
+// Each LLM stage is validated and re-thought on failure (see runStage).
 func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput) (*TurnResult, error) {
 	// 1. Checkpoint
 	if err := e.saveCheckpoint(ctx, input.SessionID, input.Turn); err != nil {
@@ -48,50 +43,53 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput) (*TurnResul
 	// Log player input
 	_ = db.AppendLog(e.db, input.SessionID, input.Turn, "player", input.Text)
 
-	// 2. GM narration
-	ragChunks, err := e.rag.Search(ctx, input.Text, 5)
-	if err != nil {
-		ragChunks = nil // RAG failure is non-fatal; continue without context
+	tr := &TurnResult{
+		SessionID:     input.SessionID,
+		Turn:          input.Turn,
+		StageAttempts: map[string]int{},
 	}
-	ragCtx := e.rag.BuildContext(ragChunks)
-	gmNarration, err := e.gmNarrate(ctx, input, ragCtx)
+
+	// 2. GM narration
+	var ragCtx string
+	if e.rag != nil {
+		// RAG failure is non-fatal; continue without context
+		if ragChunks, err := e.rag.Search(ctx, input.Text, 5); err == nil {
+			ragCtx = e.rag.BuildContext(ragChunks)
+		}
+	}
+	gmNarration, err := e.gmNarrate(ctx, tr, input, ragCtx)
 	if err != nil {
 		return nil, fmt.Errorf("gm narration: %w", err)
 	}
-	_ = db.AppendLog(e.db, input.SessionID, input.Turn, "gm", gmNarration)
+	tr.GMNarration = gmNarration
 
-	// 3. Load NPC sheets and broadcast in parallel
+	// 3. Load NPC sheets and let each NPC act in turn
 	sheets, err := db.GetNPCSheets(e.db, input.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("get npc sheets: %w", err)
 	}
-	npcActions, err := e.broadcastNPCs(ctx, input.SessionID, input.Turn, gmNarration, sheets)
+	npcActions, err := e.runNPCs(ctx, tr, gmNarration, sheets)
 	if err != nil {
-		return nil, fmt.Errorf("npc broadcast: %w", err)
+		return nil, fmt.Errorf("npc actions: %w", err)
 	}
+	tr.NPCActions = npcActions
 
-	// 5. Support LM resource calculation
-	deltas, err := e.calculateResources(ctx, input.SessionID, input.Turn, npcActions, sheets)
+	// 4. Support LM resource calculation
+	deltas, err := e.calculateResources(ctx, tr, npcActions, sheets)
 	if err != nil {
 		return nil, fmt.Errorf("resource calc: %w", err)
 	}
+	tr.Deltas = deltas
 
-	// Apply deltas to DB
+	// 5. Apply deltas to DB
 	if err := e.applyDeltas(deltas, sheets); err != nil {
 		return nil, fmt.Errorf("apply deltas: %w", err)
 	}
 
 	// Apply formation changes from NPC actions
-	formationChanges := e.applyFormationChanges(npcActions, sheets)
+	tr.FormationChanges = e.applyFormationChanges(npcActions, sheets)
 
-	return &TurnResult{
-		SessionID:        input.SessionID,
-		Turn:             input.Turn,
-		GMNarration:      gmNarration,
-		NPCActions:       npcActions,
-		Deltas:           deltas,
-		FormationChanges: formationChanges,
-	}, nil
+	return tr, nil
 }
 
 func (e *Engine) saveCheckpoint(ctx context.Context, sessionID int64, turn int) error {
@@ -104,7 +102,7 @@ func (e *Engine) saveCheckpoint(ctx context.Context, sessionID int64, turn int) 
 	return db.SaveCheckpoint(e.db, sessionID, turn, string(snap))
 }
 
-func (e *Engine) gmNarrate(ctx context.Context, input PlayerInput, ragCtx string) (string, error) {
+func (e *Engine) gmNarrate(ctx context.Context, tr *TurnResult, input PlayerInput, ragCtx string) (string, error) {
 	systemPrompt := `あなたはソード・ワールド2.5のGMです。
 プレイヤーやシステムからの入力に対して、必ず日本語で応答してください。
 - 行動描写の場合: 情景・結果を2〜4文で描写する
@@ -117,95 +115,64 @@ func (e *Engine) gmNarrate(ctx context.Context, input PlayerInput, ragCtx string
 		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: input.Text},
 	}
-	return e.pool.GM.Complete(ctx, msgs, llm.CompletionOptions{Temperature: 0.8, MaxTokens: 2048})
+	res, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
+		name:      "gm",
+		opts:      llm.CompletionOptions{Temperature: 0.8, MaxTokens: 2048},
+		retryHint: "GMとして情景・結果を日本語の地の文で描写し直してください。",
+		validate:  func(r llm.Result) error { return ValidateGMNarration(r) },
+	}, msgs)
+	tr.StageAttempts["gm"] = attempts
+	return strings.TrimSpace(res.Text), err
 }
 
-func (e *Engine) broadcastNPCs(ctx context.Context, sessionID int64, turn int, gmNarration string, sheets []db.NPCSheet) ([]NPCAction, error) {
-	if len(sheets) == 0 {
-		return nil, nil
-	}
-
-	type npcResult struct {
-		action *NPCAction
-		err    error
-	}
-	results := make([]npcResult, len(sheets))
-
-	var wg sync.WaitGroup
-	for i, s := range sheets {
-		wg.Add(1)
-		go func(idx int, sheet db.NPCSheet) {
-			defer wg.Done()
-			client := e.pool.NPCs[idx%3]
-			opts := llm.CompletionOptions{Temperature: 0.7, MaxTokens: 2048}
-
-			currentLane := positionToLane(sheet.PositionY)
-			basePrompt := fmt.Sprintf(
-				"あなたはNPC「%s」です。現在HP=%d / MP=%d。現在のレーン: %s。\n"+
-					"戦闘は3レーン制（enemy=敵後衛 / front=フロントライン / party=味方後衛）です。\n"+
-					"状況を受け、以下のYAML形式のみで行動を出力してください。コードブロック・説明文は一切不要。\n"+
-					"制約: mp_costは0以上%d以下の整数、hp_deltaは%d以上0以下の整数。\n"+
-					"new_laneは「不意打ちで後衛が前線に引き出された」「前線崩壊で押し込まれた」など"+
-					"レーンが実際に変わる場合のみ enemy/front/party のいずれかを記入し、変化なければ省略。\n"+
-					"name: %s\naction: <行動>\ndialogue: <台詞>\nmp_cost: <消費MP整数>\nhp_delta: <HP変化整数>\nnew_lane: <省略可>",
-				sheet.Name, sheet.HP, sheet.MP, currentLane,
-				sheet.MP, -sheet.HP,
-				sheet.Name,
-			)
-			msgs := []llm.Message{
-				{Role: "system", Content: basePrompt},
-				{Role: "user", Content: gmNarration},
-			}
-
-			var action *NPCAction
-			var validErr error
-			var yamlText string
-
-			for attempt := 0; attempt <= npcRetryLimit; attempt++ {
-				text, err := client.Complete(ctx, msgs, opts)
-				if err != nil {
-					validErr = err
-					break
-				}
-				yamlText = text
-				cleaned := stripCodeBlock(text)
-				action, validErr = ParseNPCAction(cleaned)
-				if validErr == nil {
-					validErr = ValidateNPCAction(action, sheet.HP, sheet.MP)
-				}
-				if validErr == nil {
-					break
-				}
-				if attempt < npcRetryLimit {
-					msgs = append(msgs,
-						llm.Message{Role: "assistant", Content: text},
-						llm.Message{Role: "user", Content: fmt.Sprintf(
-							"エラー: %v\nmp_costは0〜%d、hp_deltaは%d〜0の範囲でYAMLのみ再出力してください。",
-							validErr, sheet.MP, -sheet.HP,
-						)},
-					)
-				}
-			}
-
-			_ = db.AppendLog(e.db, sessionID, turn, "npc", yamlText)
-			results[idx] = npcResult{action, validErr}
-		}(i, s)
-	}
-	wg.Wait()
-
+// runNPCs asks each NPC for its action, one after another. An NPC whose
+// output never validates sits out this turn (recorded in tr.Warnings); a
+// transport error aborts the turn.
+func (e *Engine) runNPCs(ctx context.Context, tr *TurnResult, gmNarration string, sheets []db.NPCSheet) ([]NPCAction, error) {
 	var actions []NPCAction
-	var errs []string
-	for i, res := range results {
-		if res.err != nil {
-			errs = append(errs, fmt.Sprintf("NPC[%d]: %v", i, res.err))
+	for _, sheet := range sheets {
+		currentLane := positionToLane(sheet.PositionY)
+		basePrompt := fmt.Sprintf(
+			"あなたはNPC「%s」です。現在HP=%d / MP=%d。現在のレーン: %s。\n"+
+				"戦闘は3レーン制（enemy=敵後衛 / front=フロントライン / party=味方後衛）です。\n"+
+				"状況を受け、以下のYAML形式のみで行動を出力してください。コードブロック・説明文は一切不要。\n"+
+				"制約: mp_costは0以上%d以下の整数、hp_deltaは%d以上0以下の整数。\n"+
+				"new_laneは「不意打ちで後衛が前線に引き出された」「前線崩壊で押し込まれた」など"+
+				"レーンが実際に変わる場合のみ enemy/front/party のいずれかを記入し、変化なければ省略。\n"+
+				"name: %s\naction: <行動>\ndialogue: <台詞>\nmp_cost: <消費MP整数>\nhp_delta: <HP変化整数>\nnew_lane: <省略可>",
+			sheet.Name, sheet.HP, sheet.MP, currentLane,
+			sheet.MP, -sheet.HP,
+			sheet.Name,
+		)
+		msgs := []llm.Message{
+			{Role: "system", Content: basePrompt},
+			{Role: "user", Content: gmNarration},
+		}
+
+		var action *NPCAction
+		_, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
+			name: "npc",
+			opts: llm.CompletionOptions{Temperature: 0.7, MaxTokens: 2048},
+			retryHint: fmt.Sprintf("name は %s、mp_costは0〜%d、hp_deltaは%d〜0の範囲でYAMLのみ再出力してください。",
+				sheet.Name, sheet.MP, -sheet.HP),
+			validate: func(r llm.Result) error {
+				a, err := ParseNPCAction(stripCodeBlock(r.Text))
+				if err == nil {
+					err = ValidateNPCActionFor(a, sheet)
+				}
+				action = a
+				return err
+			},
+		}, msgs)
+		tr.StageAttempts["npc:"+sheet.Name] = attempts
+		if errors.Is(err, errRejected) {
+			tr.Warnings = append(tr.Warnings, fmt.Sprintf("NPC %s は行動できませんでした: %v", sheet.Name, err))
 			continue
 		}
-		if res.action != nil {
-			actions = append(actions, *res.action)
+		if err != nil {
+			return actions, fmt.Errorf("NPC %s: %w", sheet.Name, err)
 		}
-	}
-	if len(errs) > 0 {
-		return actions, fmt.Errorf("some NPCs failed: %s", strings.Join(errs, "; "))
+		actions = append(actions, *action)
 	}
 	return actions, nil
 }
@@ -227,7 +194,9 @@ func stripCodeBlock(s string) string {
 	return s
 }
 
-func (e *Engine) calculateResources(ctx context.Context, sessionID int64, turn int, actions []NPCAction, sheets []db.NPCSheet) ([]ResourceDelta, error) {
+// calculateResources asks the Support stage to confirm each NPC's HP / MP
+// change. If its output never validates, the NPCs' own values are used.
+func (e *Engine) calculateResources(ctx context.Context, tr *TurnResult, actions []NPCAction, sheets []db.NPCSheet) ([]ResourceDelta, error) {
 	if len(actions) == 0 {
 		return nil, nil
 	}
@@ -241,18 +210,30 @@ NPC行動リストを受け取り、各NPCのHP変化とMP消費を確定して�
 行動に攻撃がなければhp_deltaは0、魔法でなければmp_costは0。`},
 		{Role: "user", Content: string(actionsJSON)},
 	}
-	raw, err := e.pool.Support.Complete(ctx, msgs, llm.CompletionOptions{MaxTokens: 512})
-	if err != nil {
-		return nil, err
-	}
-	_ = db.AppendLog(e.db, sessionID, turn, "support", raw)
 
 	var deltas []ResourceDelta
-	if err := json.Unmarshal([]byte(raw), &deltas); err != nil {
+	_, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
+		name:      "support",
+		opts:      llm.CompletionOptions{MaxTokens: 512},
+		retryHint: "行動リストの全NPCについて1件ずつ、指定形式のJSON配列のみを再出力してください。",
+		validate: func(r llm.Result) error {
+			d, err := ParseResourceDeltas(r.Text, actions, sheets)
+			deltas = d
+			return err
+		},
+	}, msgs)
+	tr.StageAttempts["support"] = attempts
+	if errors.Is(err, errRejected) {
 		// Fallback: use values directly from NPCAction
+		tr.Warnings = append(tr.Warnings, fmt.Sprintf("Support の出力が不正なため NPC 自身の値を使いました: %v", err))
+		deltas = nil
 		for _, a := range actions {
 			deltas = append(deltas, ResourceDelta{NPCName: a.Name, HPDelta: a.HPDelta, MPCost: a.MPCost})
 		}
+		return deltas, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	return deltas, nil
 }
@@ -333,4 +314,3 @@ func (e *Engine) applyDeltas(deltas []ResourceDelta, sheets []db.NPCSheet) error
 	}
 	return nil
 }
-
