@@ -8,14 +8,14 @@
 
 **SW2.5 Omni-Master** は、TRPG「ソード・ワールド2.5」のセッションをAIが自律進行するオーケストレーションシステムです。
 
-GMとNPCをそれぞれ独立したローカルLLM（Large Language Model）が担当し、プレイヤーの行動宣言に対してリアルタイムで応答を生成します。ルールブックをベクトル検索（RAG）で参照することでルール整合性を保ち、ComfyUIによるシーン画像生成も統合しています。
+GM・NPC・サポート（リソース検証）を、ローカルで動く 1 つのチャット LLM（Large Language Model）が直列に担当し、プレイヤーの行動宣言に対して応答を生成します。LLM は別リポジトリの推論基盤 mlx-serve（`/Users/kf/AI/MLX`）が提供し、Omni-Master 自身は推論プロセスを起動しません。ルールブックをベクトル検索（RAG）で参照することでルール整合性を保ち、ComfyUIによるシーン画像生成も統合しています。
 
 ### 主な特徴
 
 | 機能 | 説明 |
 |------|------|
 | **GM自律進行** | LLMがGM役を担い、プレイヤーの行動に対して状況描写・判定を自動生成 |
-| **NPCマルチエージェント** | 各NPCが独立したLLMインスタンスを持ち、個別の人格で行動 |
+| **NPCマルチエージェント** | 各NPCが同じモデルを順番に使い、個別の人格で行動。段ごとに出力を検証し、不正なら再思考 |
 | **RAGルール参照** | インポートしたルールブックを埋め込みベクトルで検索し、LLMに注入 |
 | **画像生成** | ComfyUI（Stable Diffusion）でシーン画像・NPCポートレートを生成 |
 | **リアルタイムUI** | WebSocketで全クライアントにターン結果をリアルタイム配信 |
@@ -37,19 +37,20 @@ GMとNPCをそれぞれ独立したローカルLLM（Large Language Model）が�
 │  ┌──────────┐  ┌────────────┐  ┌─────────────────┐  │
 │  │ REST API │  │ Game Engine │  │ WebSocket Hub  │  │
 │  └──────────┘  └─────┬──────┘  └─────────────────┘  │
-│                      │ HTTP                         │
+│                      │ HTTP (OpenAI 互換)            │
 └──────────────────────┼──────────────────────────────┘
                        │
-        ┌──────────────┼──────────────────┐
-        ▼              ▼                  ▼
-  ┌───────────┐  ┌───────────┐   ┌──────────────┐
-  │ GM LLM    │  │ NPC LLM   │   │ Embed LLM    │
-  │ :11430    │  │ A/B/C     │   │ :11435       │
-  │(Gemma-4B) │  │:11432-34  │   │(nomic-embed) │
-  └───────────┘  └───────────┘   └──────────────┘
-        ▲              ▲
-        │ RAG Context  │
-  ┌─────┴──────────────┴───────┐
+┌──────────────────────▼──────────────────────────────┐
+│  mlx-serve (/Users/kf/AI/MLX, 別リポジトリ)           │
+│  ┌─────────────────────────────┐ ┌────────────────┐ │
+│  │ Chat LLM :11441              │ │ Embed :11455   │ │
+│  │ gemma4-31b-it-heretic-4bit-  │ │ bge-m3-q8      │ │
+│  │ mtp (GM / NPC / Support)     │ │ (1024 次元)    │ │
+│  └─────────────────────────────┘ └────────────────┘ │
+└─────────────────────────────────────────────────────┘
+        ▲
+        │ RAG Context
+  ┌─────┴──────────────────────┐
   │     SQLite DB (omni.db)    │
   │  rag_chunks / sessions /   │
   │  npc_sheets / quests / ... │
@@ -73,15 +74,14 @@ GMとNPCをそれぞれ独立したローカルLLM（Large Language Model）が�
 
 | レイヤー | 技術 | 役割 |
 |----------|------|------|
-| **フロントエンド** | React 18 + TypeScript + Vite | ゲームUI |
-| **バックエンド** | Go 1.22+ | REST API・ゲームエンジン |
+| **フロントエンド** | React 19 + TypeScript + Vite | ゲームUI |
+| **バックエンド** | Go 1.26+ | REST API・ゲームエンジン |
 | **データベース** | SQLite (modernc/sqlite) | 全永続データ |
-| **LLMランタイム** | llama-server (llama.cpp) | ローカルLLM推論 |
-| **GMモデル** | Gemma-4-E4B (Q4_K_M) | GM役 |
-| **NPCモデル** | Gemma-4-E2B (Q4_K_P) | NPC役・バリデーション |
-| **埋め込みモデル** | nomic-embed-text-v1.5 (Q4_K_M) | RAGベクトル生成 |
+| **LLMランタイム** | mlx-serve（別リポジトリ） | ローカルLLM推論（OpenAI 互換 API） |
+| **チャットモデル** | Gemma 4 31B-it (`gemma4-31b-it-heretic-4bit-mtp`, mlx-vlm + MTP) | GM・NPC・サポートを 1 モデルで直列処理 |
+| **埋め込みモデル** | BGE-M3 (`bge-m3-q8`, 1024 次元) | RAGベクトル生成 |
 | **画像生成** | ComfyUI + Stable Diffusion | シーン・ポートレート |
-| **バッチツール** | Python 3.11+ + uv | ルールブック処理・シナリオ生成 |
+| **バッチツール** | Python 3.14+ + uv | ルールブック処理・シナリオ生成 |
 
 ---
 
@@ -105,9 +105,10 @@ sw25-omni-master/
 │       ├── game/               # ゲームロジック
 │       │   ├── turn.go         # ターン処理オーケストレーション
 │       │   ├── types.go        # データ型定義
-│       │   ├── validate.go     # アクション検証
+│       │   ├── stage.go        # 段ごとの呼び出し・検証・再思考
+│       │   ├── validate.go     # GM / NPC / Support 出力の検証
 │       │   └── comfyui.go      # 画像生成クライアント
-│       ├── llm/                # LLMクライアント
+│       ├── llm/                # LLMクライアント（mlx-serve 向け）
 │       └── rag/                # ベクトル検索エンジン
 ├── ui/                         # React フロントエンド
 │   └── src/
@@ -116,6 +117,7 @@ sw25-omni-master/
 │       ├── hooks/              # useGameSocket.ts
 │       └── utils/              # questEligibility.ts
 ├── ai-agents/                  # Python バッチツール
+│   ├── mlx_client.py           # mlx-serve 呼び出しの共通ヘルパー
 │   ├── ocr_rulebook.py         # ルールブックインポート
 │   ├── embed_chunks.py         # 埋め込み生成
 │   ├── optimize_chunks.py      # チャンク最適化
@@ -130,33 +132,34 @@ sw25-omni-master/
 ├── docs/                       # ドキュメント
 ├── logs/                       # サービスログ
 ├── config.env                  # 設定ファイル
+├── scripts/
+│   ├── Start-Omni.ps1          # オーケストレーター + UI 起動
+│   └── Stop-Omni.ps1           # オーケストレーター + UI 停止
 ├── setup.sh                    # DB初期化・リセット
-├── start.sh                    # 全サービス起動
-└── stop.sh                     # 全サービス停止
+├── start.sh                    # 旧起動スクリプト（非推奨・削除予定）
+└── stop.sh                     # 旧停止スクリプト（非推奨・削除予定）
 ```
 
 ---
 
 ## 5. 設定ファイル (config.env)
 
-`config.env` に記載した値は `start.sh` と Go サーバーが起動時に読み込みます。OS 環境変数 > config.env > デフォルト値 の優先順で適用されます。
+`config.env` に記載した値は `scripts/Start-Omni.ps1` と Go サーバーが起動時に読み込みます。OS 環境変数 > config.env > デフォルト値 の優先順で適用されます。
 
 | キー | デフォルト値 | 説明 |
 |------|-------------|------|
 | `DB_PATH` | `data/omni.db` | SQLite データベースファイルパス |
 | `ADDR` | `:8080` | Go サーバーのリッスンアドレス |
 | `COMFY_URL` | `""` (空=無効) | ComfyUI のエンドポイント URL |
-| `LLAMA_SERVER` | `llama-server` | llama-server バイナリ名・パス |
-| `MODEL_GM` | (必須) | GM役 LLM モデルファイルの絶対パス |
-| `MODEL_NPC` | (必須) | NPC役・サポート LLM モデルの絶対パス |
-| `MODEL_EMBED` | (必須) | 埋め込みモデルの絶対パス |
-| `GM_URL` | `http://localhost:11430` | GM LLM エンドポイント |
-| `SUPPORT_URL` | `http://localhost:11431` | バリデーション LLM エンドポイント |
-| `NPC_A_URL` | `http://localhost:11432` | NPC-A LLM エンドポイント |
-| `NPC_B_URL` | `http://localhost:11433` | NPC-B LLM エンドポイント |
-| `NPC_C_URL` | `http://localhost:11434` | NPC-C LLM エンドポイント |
-| `EMBED_URL` | `http://localhost:11435` | 埋め込み LLM エンドポイント |
+| `LLM_URL` | `http://127.0.0.1:11441` | チャットモデル（mlx-serve プロファイル）のエンドポイント。GM・NPC・サポート共通 |
+| `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | 全リクエストに付ける `model`。mlx-serve のプロファイル名と一致させる |
+| `LLM_TIMEOUT_SEC` | `300` | LLM 1 リクエストのタイムアウト（秒） |
+| `STAGE_RETRY_LIMIT` | `2` | 出力が検証を通らなかった段を再思考させる回数（0 で再試行なし） |
+| `EMBED_URL` | `http://127.0.0.1:11455` | 埋め込みモデル（mlx-serve プロファイル）のエンドポイント |
+| `EMBED_MODEL_ID` | `bge-m3-q8` | 埋め込みリクエストに付ける `model` |
 | `PERSONAS_DIR` | `data/personas` | NPC ペルソナ YAML ファイルの格納ディレクトリ |
+
+> `LLM_MODEL_ID` / `EMBED_MODEL_ID` は mlx-serve のプロファイルの `model_id` と一致させてください。mlx-vlm は `model` がないと 422 を返し、別の名前を送ると常駐モデルを入れ替えて再ロードします。
 
 ---
 
@@ -370,42 +373,70 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
 
 ## 8. ゲームエンジン処理フロー
 
+すべての LLM 段は同じチャットモデル（`LLM_URL`）を 1 段ずつ直列に呼びます。
+
 ```
 プレイヤー → POST /api/turn
                     │
            ┌────────▼─────────┐
+           │  チェックポイント  │ ← checkpoints 保存（自動）
+           └────────┬─────────┘
+           ┌────────▼─────────┐
            │  RAG 検索         │ ← rag_chunks をコサイン類似度で検索
            │  (関連ルール抽出)  │   優先度: houserule > correction > rulebook
-           └────────┬────────┘
+           └────────┬─────────┘
                     │ コンテキスト注入
-           ┌────────▼────────┐
-           │  GM LLM         │ ← :11430（Gemma-4B）
-           │  状況描写生成     │   NPC行動提案を含むYAML出力
-           └────────┬────────┘
-                    │ 並列実行
-         ┌──────────┼──────────┐
-         ▼          ▼          ▼
-    NPC-A LLM  NPC-B LLM  NPC-C LLM    ← :11432〜11434
-    個別行動   個別行動   個別行動       （各NPCの人格に基づく）
-         └──────────┼──────────┘
-                    │ 全NPC行動
-           ┌────────▼────────┐
-           │  Support LLM    │ ← :11431
-           │  ルール検証       │   HP/MP変化量を計算
-           │  リソース計算     │
-           └────────┬────────┘
-                    │
-           ┌────────▼────────┐
-           │  DB 状態更新      │ ← npc_sheets HP/MP更新
+           ┌────────▼─────────┐
+           │  GM               │ ← 状況描写（地の文）を生成
+           └────────┬─────────┘
+           ┌────────▼─────────┐
+           │  NPC 1 → 2 → 3   │ ← シート順に 1 体ずつ（各NPCの人格に基づく）
+           │  個別行動 (YAML)  │
+           └────────┬─────────┘
+           ┌────────▼─────────┐
+           │  Support          │ ← HP/MP変化量を確定（JSON 配列）
+           └────────┬─────────┘
+           ┌────────▼─────────┐
+           │  DB 状態更新      │ ← npc_sheets HP/MP・隊列更新
            │  ログ記録         │   session_logs 追記
-           │  チェックポイント  │   checkpoints 保存（自動）
-           └────────┬────────┘
+           └────────┬─────────┘
                     │ WebSocket ブロードキャスト
-           ┌────────▼────────┐
+           ┌────────▼─────────┐
            │  ComfyUI 画像    │ ← オプション（非同期）
            │  生成・配信       │   ImageUpdate を別途ブロードキャスト
-           └─────────────────┘
+           └──────────────────┘
 ```
+
+### 8.1 段ごとの検証と再思考
+
+各 LLM 段の出力は検証され、NG の場合はその段だけを呼び直します（再思考）。再思考では、却下された出力とエラー内容を会話に追加し、thinking を有効化（`enable_thinking=true`、`max_tokens` +2048）して呼び直します。再試行は最大 `STAGE_RETRY_LIMIT` 回（既定 2、つまり最大 3 回呼び出し）です。通信エラーは再試行しません。
+
+| 段 | NG 条件 | 上限を超えたとき |
+|----|--------|-----------------|
+| GM | 本文が空 / 途中で切れた（`finish_reason=length`）/ 拒否文 / YAML・JSON を出力している | ターンを失敗にする |
+| NPC | YAML としてパースできない / `name` がシート名と違う / `action`・`dialogue` が空 / `mp_cost` が 0〜現在MP の範囲外 / `hp_delta` < -現在HP / `new_lane` が `enemy`・`front`・`party` 以外 | その NPC だけ今回のターンを見送る（`warnings` に記録） |
+| Support | JSON 配列でない / 行動した NPC ごとにちょうど 1 件でない（不明・重複の名前を含む）/ 値が範囲外 | NPC 自身の `hp_delta` / `mp_cost` を使う（`warnings` に記録） |
+
+どの段も途中で切れた出力（`finish_reason=length`）は NG として扱います。各試行は `session_logs` に記録されます。
+
+### 8.2 LLM リクエスト
+
+すべてのチャットリクエスト（`/v1/chat/completions`）に次を付けます。
+
+| 項目 | 内容 |
+|------|------|
+| `model` | `LLM_MODEL_ID`。mlx-vlm は省略すると 422、別の名前だと常駐モデルを再ロードする |
+| `seed` | 毎回ランダム。指定しないと mlx-vlm は同じ入力に同じ文を返す |
+| thinking | 通常は `{"enable_thinking": false, "chat_template_kwargs": {"enable_thinking": false}}`。再思考時のみ有効化 |
+
+埋め込みは `/v1/embeddings` に `{"model": EMBED_MODEL_ID, "input": ...}` を送ります。
+
+### 8.3 TurnResult の追加フィールド
+
+| フィールド | 型 | 説明 |
+|-----------|----|------|
+| `stage_attempts` | map[string]int | 段ごとの LLM 呼び出し回数。キーは `gm` / `npc:<名前>` / `support`。2 以上は再思考したことを示す |
+| `warnings` | []string | 検証を通らず見送り・フォールバックした段の説明 |
 
 ---
 
@@ -435,7 +466,6 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
 ```yaml
 id: gard                    # システムID（ファイル名と一致推奨）
 name: ガルド                # 表示名
-port: 11432                 # 使用するllama-serverポート (11432〜11434)
 
 race: ドワーフ
 gender: 男
@@ -539,14 +569,15 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ### チャンク作成
 - ルールブック（PDF/Markdown）を `ocr_rulebook.py` でチャンク化
 - チャンクサイズ: 約500文字（セクション境界で分割）
-- `embed_chunks.py` でベクトル化（nomic-embed-text-v1.5）
+- `embed_chunks.py` でベクトル化（mlx-serve の `bge-m3-q8`、1024 次元）
+- 埋め込みモデルを変えた場合はベクトルの次元が変わるため、全チャンクを再埋め込みする（`embed_chunks.py --reembed-all`）
 
 ### 検索アルゴリズム
 1. 入力テキストを埋め込みベクトルに変換
 2. `rag_chunks` 全行とコサイン類似度を計算
 3. 類似度順ソート → 同値は `priority` で優先（ハウスルール最優先）
 4. `rag_chunks_opt` が存在するチャンクはそちらのテキスト・ベクトルを優先使用
-5. 上位K件をGM/NPCのLLMプロンプトに注入
+5. 上位K件をGMのLLMプロンプトに注入
 
 ### 優先度
 | `priority` | `source_type` | 説明 |

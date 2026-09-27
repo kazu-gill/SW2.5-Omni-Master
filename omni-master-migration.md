@@ -201,3 +201,27 @@ func (e *Engine) runStage(ctx, stage string, msgs []llm.Message, opts llm.Comple
 - テスト・lint の結果
 - 段ごとの試行回数と所要時間 (Phase 3 以降)
 - 止まった理由と、未解決のこと
+
+---
+
+## 8. 進捗 (2026-09-27)
+
+| Phase | 状態 | メモ |
+|---|---|---|
+| 0 | ✅ | R1 (MTP で thinking) / R2 (seed) とも OK。`docs/mlx-serve-client-notes.md` |
+| 1〜3 | ✅ | Go 側。1 モデル直列化 + 段ごとの検証・再思考。`go test ./...` 通過 |
+| 4 | ✅ | `scripts/Start-Omni.ps1` / `Stop-Omni.ps1`。`start.sh` / `stop.sh` は削除待ち (ユーザー確認) |
+| 5 | ✅ (一部) | バッチツールを mlx-serve 対応、`--reembed-all` を追加。**このマシンにはルールブックが未投入のため、再埋め込みと RAG 検索の見比べ (手順 4・5) は未実施** |
+| 6 | ✅ | `docs/verification-serial-20260927.md`。中央値 19 秒/ターン、再思考 0 回 |
+| 7 | ✅ | `data/schema.sql` 削除、`mise.toml` / Volta pin、README・docs 更新 |
+
+lint について: `ai-agents` は既存コードに ruff の指摘が元から約 40 件あり、`ui` は `npm run lint` で既存の 6 件 (react-hooks) が出る。今回触ったファイルで新たな指摘は増やしていない。一括整形は差分が大きくなるため別作業とする。
+
+## 9. 次の改善候補 (未着手・要判断)
+
+Phase 6 で見えた課題。処理の流れ (5 段直列) は変えずにできる。
+
+1. **NPC にペルソナを渡す** — 今は名前・HP・MP・レーンしか渡していない。`npc_sheets.yaml_blob` の種族・職業・性格・口調をシステムプロンプトに入れる。口調の重なりや、魔法職が「盾で押し返す」といったズレが減る見込み
+2. **後の NPC に先の NPC の行動を渡す** — 直列化したので、同じターンで先に行動した NPC の `action` / `dialogue` を後の NPC のプロンプトに足せる。行動の重複 (2 人とも「罠の解除」) を避けられる
+3. **Support の役割を見直す** — 現状は NPC の申告値をそのまま写すだけ (10/10 一致)。ルール (RAG) を参照して妥当性を判定させるか、段を残したまま Go 側の計算に寄せるかを決める
+4. **mlx-serve の散発的な停滞 (約 40 秒) の調査** — mlx-serve 側の課題。MTP なしのプロファイルでも起きるかを確認する (mlx-serve リポジトリ側の作業)

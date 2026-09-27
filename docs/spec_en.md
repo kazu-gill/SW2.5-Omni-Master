@@ -6,14 +6,14 @@
 
 ## 1. System Overview
 
-**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". Independent local LLMs handle the Game Master (GM) and NPC roles, generating real-time responses to player action declarations. Rule consistency is maintained by retrieving relevant rulebook passages via vector search (RAG), and optional integration with ComfyUI enables automated scene image generation.
+**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". A single local chat LLM handles the Game Master (GM), NPC and Support (resource validation) roles one after another, generating responses to player action declarations. The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform; Omni-Master itself does not launch any inference process. Rule consistency is maintained by retrieving relevant rulebook passages via vector search (RAG), and optional integration with ComfyUI enables automated scene image generation.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
 | **Autonomous GM** | LLM acts as GM, generating situational narration and rulings for each player action |
-| **NPC Multi-Agent** | Each NPC runs on its own LLM instance with an individual personality |
+| **NPC Multi-Agent** | NPCs take turns on the same model, each with an individual personality. Every stage's output is validated and re-thought if invalid |
 | **RAG Rule Lookup** | Imported rulebook is searched by embedding vector and injected into LLM prompts |
 | **Image Generation** | ComfyUI (Stable Diffusion) generates scene images and NPC portraits |
 | **Real-time UI** | WebSocket broadcasts turn results to all connected clients |
@@ -35,19 +35,20 @@
 │  ┌──────────┐  ┌────────────┐  ┌────────────────┐   │
 │  │ REST API │  │ Game Engine │  │ WebSocket Hub  │  │
 │  └──────────┘  └─────┬──────┘  └────────────────┘   │
-│                      │ HTTP                         │
+│                      │ HTTP (OpenAI-compatible)     │
 └──────────────────────┼──────────────────────────────┘
                        │
-        ┌──────────────┼──────────────────┐
-        ▼              ▼                  ▼
-  ┌───────────┐  ┌───────────┐   ┌──────────────┐
-  │ GM LLM    │  │ NPC LLMs  │   │ Embed LLM    │
-  │ :11430    │  │ A/B/C     │   │ :11435       │
-  │(Gemma-4B) │  │:11432-34  │   │(nomic-embed) │
-  └───────────┘  └───────────┘   └──────────────┘
-        ▲              ▲
-        │ RAG Context  │
-  ┌─────┴──────────────┴───────┐
+┌──────────────────────▼──────────────────────────────┐
+│  mlx-serve (/Users/kf/AI/MLX, separate repo)        │
+│  ┌─────────────────────────────┐ ┌────────────────┐ │
+│  │ Chat LLM :11441              │ │ Embed :11455   │ │
+│  │ gemma4-31b-it-heretic-4bit-  │ │ bge-m3-q8      │ │
+│  │ mtp (GM / NPC / Support)     │ │ (1024-dim)     │ │
+│  └─────────────────────────────┘ └────────────────┘ │
+└─────────────────────────────────────────────────────┘
+        ▲
+        │ RAG Context
+  ┌─────┴──────────────────────┐
   │     SQLite DB (omni.db)    │
   │  rag_chunks / sessions /   │
   │  npc_sheets / quests / ... │
@@ -70,15 +71,14 @@
 
 | Layer | Technology | Role |
 |-------|-----------|------|
-| **Frontend** | React 18 + TypeScript + Vite | Game UI |
-| **Backend** | Go 1.22+ | REST API and game engine |
+| **Frontend** | React 19 + TypeScript + Vite | Game UI |
+| **Backend** | Go 1.26+ | REST API and game engine |
 | **Database** | SQLite (modernc/sqlite) | All persistent data |
-| **LLM Runtime** | llama-server (llama.cpp) | Local LLM inference |
-| **GM Model** | Gemma-4-E4B (Q4_K_M) | GM role |
-| **NPC Model** | Gemma-4-E2B (Q4_K_P) | NPC roles and validation |
-| **Embed Model** | nomic-embed-text-v1.5 (Q4_K_M) | RAG vector generation |
+| **LLM Runtime** | mlx-serve (separate repo) | Local LLM inference (OpenAI-compatible API) |
+| **Chat Model** | Gemma 4 31B-it (`gemma4-31b-it-heretic-4bit-mtp`, mlx-vlm + MTP) | GM, NPC and Support roles, run serially on one model |
+| **Embed Model** | BGE-M3 (`bge-m3-q8`, 1024-dim) | RAG vector generation |
 | **Image Gen** | ComfyUI + Stable Diffusion | Scene and portrait images |
-| **Batch Tools** | Python 3.11+ + uv | Rulebook processing, scenario generation |
+| **Batch Tools** | Python 3.14+ + uv | Rulebook processing, scenario generation |
 
 ---
 
@@ -102,9 +102,10 @@ sw25-omni-master/
 │       ├── game/               # Game logic
 │       │   ├── turn.go         # Turn orchestration
 │       │   ├── types.go        # Data type definitions
-│       │   ├── validate.go     # Action validation
+│       │   ├── stage.go        # Per-stage call, validation and re-thinking
+│       │   ├── validate.go     # GM / NPC / Support output validation
 │       │   └── comfyui.go      # Image generation client
-│       ├── llm/                # LLM HTTP client
+│       ├── llm/                # LLM HTTP client (for mlx-serve)
 │       └── rag/                # Vector search engine
 ├── ui/                         # React frontend
 │   └── src/
@@ -113,6 +114,7 @@ sw25-omni-master/
 │       ├── hooks/              # useGameSocket.ts
 │       └── utils/              # questEligibility.ts
 ├── ai-agents/                  # Python batch tools
+│   ├── mlx_client.py           # Shared mlx-serve helpers
 │   ├── ocr_rulebook.py         # Rulebook importer
 │   ├── embed_chunks.py         # Embedding generator
 │   ├── optimize_chunks.py      # Chunk optimizer
@@ -127,33 +129,34 @@ sw25-omni-master/
 ├── docs/                       # Documentation
 ├── logs/                       # Service logs
 ├── config.env                  # Configuration file
+├── scripts/
+│   ├── Start-Omni.ps1          # Start orchestrator + UI
+│   └── Stop-Omni.ps1           # Stop orchestrator + UI
 ├── setup.sh                    # DB initialization / reset
-├── start.sh                    # Start all services
-└── stop.sh                     # Stop all services
+├── start.sh                    # Legacy start script (deprecated, to be removed)
+└── stop.sh                     # Legacy stop script (deprecated, to be removed)
 ```
 
 ---
 
 ## 5. Configuration (config.env)
 
-Values in `config.env` are loaded by `start.sh` and the Go server at startup. Priority: OS environment variable > config.env > built-in default.
+Values in `config.env` are loaded by `scripts/Start-Omni.ps1` and the Go server at startup. Priority: OS environment variable > config.env > built-in default.
 
 | Key | Default | Description |
 |-----|---------|-------------|
 | `DB_PATH` | `data/omni.db` | SQLite database file path |
 | `ADDR` | `:8080` | Go server listen address |
 | `COMFY_URL` | `""` (empty = disabled) | ComfyUI endpoint URL |
-| `LLAMA_SERVER` | `llama-server` | llama-server binary name or path |
-| `MODEL_GM` | (required) | Absolute path to GM LLM model file (.gguf) |
-| `MODEL_NPC` | (required) | Absolute path to NPC/Support LLM model file |
-| `MODEL_EMBED` | (required) | Absolute path to embedding model file |
-| `GM_URL` | `http://localhost:11430` | GM LLM endpoint |
-| `SUPPORT_URL` | `http://localhost:11431` | Validation LLM endpoint |
-| `NPC_A_URL` | `http://localhost:11432` | NPC-A LLM endpoint |
-| `NPC_B_URL` | `http://localhost:11433` | NPC-B LLM endpoint |
-| `NPC_C_URL` | `http://localhost:11434` | NPC-C LLM endpoint |
-| `EMBED_URL` | `http://localhost:11435` | Embedding LLM endpoint |
+| `LLM_URL` | `http://127.0.0.1:11441` | Chat model endpoint (mlx-serve profile), shared by GM, NPC and Support |
+| `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | `model` sent with every request. Must match the mlx-serve profile name |
+| `LLM_TIMEOUT_SEC` | `300` | Timeout per LLM request (seconds) |
+| `STAGE_RETRY_LIMIT` | `2` | How many times a stage is re-thought after its output fails validation (0 = no retry) |
+| `EMBED_URL` | `http://127.0.0.1:11455` | Embedding model endpoint (mlx-serve profile) |
+| `EMBED_MODEL_ID` | `bge-m3-q8` | `model` sent with embedding requests |
 | `PERSONAS_DIR` | `data/personas` | Directory containing NPC persona YAML files |
+
+> `LLM_MODEL_ID` / `EMBED_MODEL_ID` must match the `model_id` of the mlx-serve profile. mlx-vlm returns 422 when `model` is missing, and reloads the resident model when a different name is sent.
 
 ---
 
@@ -359,34 +362,32 @@ Images linked to scenarios (`scenario_id=NULL` means shared background).
 
 ## 8. Game Engine Processing Flow
 
+Every LLM stage calls the same chat model (`LLM_URL`), one stage at a time.
+
 ```
 Player → POST /api/turn
                 │
+       ┌────────▼─────────┐
+       │  Checkpoint      │ ← Save checkpoint (auto)
+       └────────┬─────────┘
        ┌────────▼─────────┐
        │  RAG Search      │ ← Cosine similarity on rag_chunks
        │  (extract rules) │   Priority: houserule > correction > rulebook
        └────────┬─────────┘
                 │ Context injection
        ┌────────▼─────────┐
-       │  GM LLM :11430   │ ← Gemma-4B
-       │  Generate scene  │   Outputs narration + NPC action suggestions (YAML)
+       │  GM              │ ← Generate scene narration (prose)
        └────────┬─────────┘
-                │ Parallel execution
-     ┌──────────┼──────────┐
-     ▼          ▼          ▼
-NPC-A :11432  NPC-B :11433  NPC-C :11434
-Individual actions based on persona
-     └──────────┼──────────┘
-                │ All NPC actions
        ┌────────▼─────────┐
-       │  Support :11431  │ ← Rule validation
-       │  Validate        │   Compute HP/MP deltas
+       │  NPC 1 → 2 → 3   │ ← One at a time, in sheet order
+       │  Actions (YAML)  │   Based on each NPC's persona
        └────────┬─────────┘
-                │
        ┌────────▼─────────┐
-       │  DB Update       │ ← Update npc_sheets HP/MP
-       │  Log & Snapshot  │   Append session_logs
-       │                  │   Save checkpoint (auto)
+       │  Support         │ ← Confirm HP/MP deltas (JSON array)
+       └────────┬─────────┘
+       ┌────────▼─────────┐
+       │  DB Update       │ ← Update npc_sheets HP/MP and lanes
+       │  Log             │   Append session_logs
        └────────┬─────────┘
                 │ WebSocket broadcast
        ┌────────▼─────────┐
@@ -394,6 +395,37 @@ Individual actions based on persona
        │  Generate/serve  │   Broadcast ImageUpdate separately
        └──────────────────┘
 ```
+
+### 8.1 Per-Stage Validation and Re-thinking
+
+Each LLM stage's output is validated. If it fails, only that stage is called again ("re-thinking"): the rejected output and the error message are appended to the conversation, and thinking is enabled (`enable_thinking=true`, `max_tokens` +2048). A stage is retried at most `STAGE_RETRY_LIMIT` times (default 2, i.e. up to 3 calls). Transport errors are not retried.
+
+| Stage | Rejected when | When retries run out |
+|-------|---------------|----------------------|
+| GM | Empty / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn fails |
+| NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` | That NPC sits out the turn (recorded in `warnings`) |
+| Support | Not a JSON array / not exactly one entry per acting NPC (unknown or duplicate names) / values out of range | The NPCs' own `hp_delta` / `mp_cost` are used (recorded in `warnings`) |
+
+Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`.
+
+### 8.2 LLM Requests
+
+Every chat request (`/v1/chat/completions`) carries:
+
+| Item | Value |
+|------|-------|
+| `model` | `LLM_MODEL_ID`. mlx-vlm returns 422 without it and reloads the resident model if a different name is sent |
+| `seed` | Random per request. Without it mlx-vlm returns identical text for identical input |
+| thinking | Normally `{"enable_thinking": false, "chat_template_kwargs": {"enable_thinking": false}}`; enabled only when re-thinking |
+
+Embeddings are requested from `/v1/embeddings` with `{"model": EMBED_MODEL_ID, "input": ...}`.
+
+### 8.3 Additional TurnResult Fields
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `stage_attempts` | map[string]int | LLM calls per stage. Keys: `gm` / `npc:<name>` / `support`. A value of 2 or more means the stage was re-thought |
+| `warnings` | []string | Stages that never validated and were skipped or fell back |
 
 ---
 
@@ -422,7 +454,6 @@ Placed at `data/personas/{id}.yaml`.
 ```yaml
 id: gard                    # System ID (match filename recommended)
 name: Gard                  # Display name
-port: 11432                 # llama-server port (11432–11434)
 
 race: Dwarf
 gender: Male
@@ -526,14 +557,15 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ### Chunk Creation
 - Import rulebook (PDF/Markdown) via `ocr_rulebook.py`
 - Chunk size: ~500 characters (split at section boundaries)
-- Vectorize via `embed_chunks.py` (nomic-embed-text-v1.5)
+- Vectorize via `embed_chunks.py` (mlx-serve `bge-m3-q8`, 1024-dim)
+- When the embedding model changes, the vector dimension changes too, so re-embed every chunk (`embed_chunks.py --reembed-all`)
 
 ### Search Algorithm
 1. Convert input text to an embedding vector
 2. Compute cosine similarity against all `rag_chunks` rows
 3. Sort by similarity; ties broken by `priority` (houserule first)
 4. If `rag_chunks_opt` exists for a chunk, use its text and vector instead
-5. Inject top-K results into GM/NPC LLM prompts
+5. Inject top-K results into the GM LLM prompt
 
 ### Priority Levels
 | `priority` | `source_type` | Description |

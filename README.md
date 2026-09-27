@@ -7,7 +7,7 @@
 
 **ソード・ワールド 2.5** 向け、ローカル LLM による完全自律型 AI-TRPG オーケストレーションシステム。
 
-クラウド API を一切使わず、ローカルで動作する複数の LLM インスタンスが GM・NPC・ルール参照・リソース検証を自動処理します。プレイヤーは Web UI から行動を入力するだけで、AI が即座にナラティブを生成してゲームを進行します。
+クラウド API を一切使わず、ローカルで動作する 1 つの LLM が GM・NPC・リソース検証を順番に担当し、ルール参照 (RAG) と組み合わせてゲームを自動処理します。LLM は別リポジトリの推論基盤 mlx-serve (`/Users/kf/AI/MLX`) が提供し、Omni-Master 自身は推論プロセスを起動しません。プレイヤーは Web UI から行動を入力するだけで、AI が即座にナラティブを生成してゲームを進行します。
 
 ---
 
@@ -15,8 +15,8 @@
 
 | 機能 | 概要 |
 |------|------|
-| **自律 GM エージェント** | Gemma-4B ベースの LLM がリアルタイムでナラティブとルーリングを生成 |
-| **マルチ NPC エージェント** | 最大 3 体の NPC が個別の LLM インスタンスで独立して行動 |
+| **自律 GM エージェント** | Gemma 4 31B-it がナラティブとルーリングを生成 |
+| **マルチ NPC エージェント** | 最大 3 体の NPC が同じモデルを順番に使い、それぞれの人格で行動。段ごとに出力を検証し、不正なら再思考 |
 | **ルールブック RAG** | ベクター検索でルール文書を動的に参照、一貫性のある判定を実現 |
 | **リアルタイム UI** | WebSocket + React によるバトルマップと GM チャンネル |
 | **画像生成** | ComfyUI (Stable Diffusion) によるシーン画像・NPC ポートレートの自動生成 (オプション) |
@@ -35,13 +35,10 @@ Go Orchestrator  :8080
   ├─ REST API ハンドラ
   ├─ ゲームエンジン（ターン処理）
   └─ WebSocket ハブ（ブロードキャスト）
-        │ HTTP
-        ├─▶ GM LLM          :11430  (Gemma-4B / 高品質モデル)
-        ├─▶ Support LLM     :11431  (Gemma-2B / リソース検証)
-        ├─▶ NPC-A LLM       :11432  (Gemma-2B)
-        ├─▶ NPC-B LLM       :11433  (Gemma-2B)
-        ├─▶ NPC-C LLM       :11434  (Gemma-2B)
-        └─▶ Embed LLM       :11435  (nomic-embed-text-v1.5)
+        │ HTTP (OpenAI 互換)
+        ├─▶ mlx-serve  :11441  gemma4-31b-it-heretic-4bit-mtp
+        │                      (GM / NPC / Support を 1 モデルで直列処理)
+        └─▶ mlx-serve  :11455  bge-m3-q8 (RAG 埋め込み, 1024 次元)
                 │
         SQLite (omni.db)
           sessions / npc_sheets / rag_chunks / checkpoints …
@@ -51,13 +48,19 @@ Go Orchestrator  :8080
 
 **ターン処理フロー:**
 
+すべての LLM 段は同じモデルを 1 段ずつ直列に呼びます。
+
 1. プレイヤーが UI から行動を入力
 2. Orchestrator がチェックポイントを保存
-3. GM LLM が RAG コンテキスト付きでナラティブを生成
-4. NPC LLM 3 体が並行してアクションを生成
-5. Support LLM がリソース変更 (HP/MP) を検証
-6. ターン結果を WebSocket で全クライアントへブロードキャスト
-7. ComfyUI が非同期でシーン画像を生成 (有効時)
+3. RAG でルールブックから関連チャンクを検索
+4. GM が RAG コンテキスト付きでナラティブを生成
+5. NPC 1 → NPC 2 → NPC 3 の順 (シート順) にアクションを生成
+6. Support がリソース変更 (HP/MP) を確定
+7. DB (HP/MP・隊列・ログ) を更新
+8. ターン結果を WebSocket で全クライアントへブロードキャスト
+9. ComfyUI が非同期でシーン画像を生成 (有効時)
+
+各段の出力は検証され、NG ならその段だけを「再思考」させます (却下した出力とエラー内容を渡し、thinking を有効化して呼び直す。最大 `STAGE_RETRY_LIMIT` 回)。それでも NG の場合、NPC はそのターンを見送り、Support は NPC 自身の HP/MP 値を使います (どちらも `warnings` に記録)。GM が NG のままならターンは失敗します。段ごとの呼び出し回数はターン結果の `stage_attempts` に入ります。詳細は [docs/spec_ja.md](docs/spec_ja.md) を参照してください。
 
 ---
 
@@ -65,21 +68,29 @@ Go Orchestrator  :8080
 
 | ツール | バージョン | 用途 |
 |--------|-----------|------|
-| [Go](https://go.dev/) | 1.26.1+ | バックエンドのビルド・実行 |
-| [Node.js](https://nodejs.org/) | 18+ | フロントエンドの開発サーバー・ビルド |
+| Mac (Apple Silicon) | — | mlx-serve の実行環境 (想定: Mac mini M5 Pro / 64GB) |
+| mlx-serve (`/Users/kf/AI/MLX`) | — | LLM 推論基盤 (チャット・埋め込み)。使い方は同リポジトリの README を参照 |
+| [Go](https://go.dev/) | `mise.toml` で管理 ([mise](https://mise.jdx.dev/)) | バックエンドのビルド・実行 |
+| [Node.js](https://nodejs.org/) | `ui/package.json` の `volta` で管理 ([Volta](https://volta.sh/)) | フロントエンドの開発サーバー・ビルド |
 | [Python](https://www.python.org/) | 3.14+ | バッチツール |
 | [uv](https://github.com/astral-sh/uv) | 最新版 | Python パッケージ管理 |
-| [llama.cpp](https://github.com/ggerganov/llama.cpp) | 最新版 | `llama-server` バイナリ |
+| [PowerShell](https://github.com/PowerShell/PowerShell) | 7+ | 起動・停止スクリプト |
 | SQLite3 | 3.35+ | DB CLI (初期化スクリプト用) |
 | [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | — | 画像生成 **(オプション)** |
 
-**必要なモデルファイル (GGUF 形式):**
+**必要な mlx-serve プロファイル:**
 
-| 用途 | 推奨モデル |
-|------|-----------|
-| GM (高品質) | Gemma-4B 相当以上 |
-| NPC / Support (軽量) | Gemma-2B 相当 |
-| 埋め込み | `nomic-embed-text-v1.5.Q4_K_M.gguf` |
+| 用途 | プロファイル | エンドポイント | 備考 |
+|------|------------|--------------|------|
+| GM / NPC / Support | `gemma4-31b-it-heretic-4bit-mtp` | `http://127.0.0.1:11441` | mlx-vlm + MTP 投機的デコード、約 22GB |
+| RAG 埋め込み | `bge-m3-q8` | `http://127.0.0.1:11455` | llama-server (mlx-serve 内部で使用)、1024 次元 |
+
+起動は mlx-serve 側で行います:
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+```
 
 ---
 
@@ -98,13 +109,16 @@ cd sw25-omni-master
 cp config.env.example config.env
 ```
 
-`config.env` を編集してモデルファイルのパスを設定します:
+`config.env` を編集します。`DB_PATH` は絶対パスで書きます。LLM の設定は既定値のままで上記 2 プロファイルに接続します:
 
 ```bash
-# 必須: モデルファイルのパスを実際のパスに変更
-MODEL_GM=/path/to/models/gm_model.gguf
-MODEL_NPC=/path/to/models/npc_model.gguf
-MODEL_EMBED=/path/to/models/nomic-embed-text-v1.5.Q4_K_M.gguf
+DB_PATH=/path/to/sw25-omni-master/data/omni.db
+
+# mlx-serve (既定値。プロファイルを変える場合のみ編集)
+LLM_URL=http://127.0.0.1:11441
+LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+EMBED_URL=http://127.0.0.1:11455
+EMBED_MODEL_ID=bge-m3-q8
 
 # オプション: 画像生成を使う場合
 COMFY_URL=http://<ComfyUI-HOST>:8188
@@ -130,9 +144,11 @@ COMFY_URL=http://<ComfyUI-HOST>:8188
 uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md \
     --db data/omni.db
 
-# 埋め込みベクターを生成する (llama-server が起動している必要あり)
+# 埋め込みベクターを生成する (mlx-serve の bge-m3-q8 が起動している必要あり)
 uv run ai-agents/embed_chunks.py --db data/omni.db
 ```
+
+> 埋め込みモデルを変更した場合はベクトルの次元が変わるため、`--reembed-all` で全チャンクを再埋め込みしてください。
 
 ### 5. フロントエンド依存関係のインストール
 
@@ -144,11 +160,15 @@ cd ui && npm install && cd ..
 
 ## 起動 / 停止 (Start / Stop)
 
-### 全サービスを一括起動
+### 起動
+
+先に mlx-serve の 2 プロファイルを起動しておきます ([前提条件](#前提条件-prerequisites) 参照)。
 
 ```bash
-./start.sh
+pwsh scripts/Start-Omni.ps1           # ログを追従する場合は -Follow
 ```
+
+`Start-Omni.ps1` は `LLM_URL` / `EMBED_URL` の `/health` を確認し、応答がなければ起動すべき `Start-MlxServe.ps1` コマンドを表示して終了します (mlx-serve を自動で起動することはありません)。応答があれば Go Orchestrator をビルドして起動し、続けて Vite Dev Server を起動します。
 
 起動後のアクセス先:
 
@@ -156,15 +176,19 @@ cd ui && npm install && cd ..
 |---------|-----|
 | Web UI | http://localhost:5173 |
 | REST API | http://localhost:8080 |
-| ログ | `logs/` ディレクトリ |
+| ログ | `logs/orchestrator.log` / `logs/ui.log` |
 
-### 全サービスを停止
+PID は `.pids` に記録されます。
+
+### 停止
 
 ```bash
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 ```
 
-> `start.sh` は llama-server 6 インスタンス → Go Orchestrator → Vite Dev Server の順に起動し、ログをターミナルに tail します。
+Go Orchestrator と Vite Dev Server を停止します。mlx-serve のプロファイルは停止しません。
+
+> `start.sh` / `stop.sh` は旧構成用のスクリプトで、非推奨です。今後削除します。
 
 ---
 
@@ -177,23 +201,21 @@ cd ui && npm install && cd ..
 | `DB_PATH` | `data/omni.db` | SQLite データベースのパス |
 | `ADDR` | `:8080` | Go サーバーのリッスンアドレス |
 | `COMFY_URL` | *(空)* | ComfyUI のエンドポイント (空で無効) |
-| `LLAMA_SERVER` | `llama-server` | llama-server バイナリのパスまたはコマンド名 |
-| `MODEL_GM` | — | GM 用モデルファイルパス **(必須)** |
-| `MODEL_NPC` | — | NPC / Support 用モデルファイルパス **(必須)** |
-| `MODEL_EMBED` | — | 埋め込み用モデルファイルパス **(必須)** |
-| `GM_URL` | `http://localhost:11430` | GM LLM エンドポイント |
-| `SUPPORT_URL` | `http://localhost:11431` | Support LLM エンドポイント |
-| `NPC_A_URL` | `http://localhost:11432` | NPC-A LLM エンドポイント |
-| `NPC_B_URL` | `http://localhost:11433` | NPC-B LLM エンドポイント |
-| `NPC_C_URL` | `http://localhost:11434` | NPC-C LLM エンドポイント |
-| `EMBED_URL` | `http://localhost:11435` | 埋め込み LLM エンドポイント |
+| `LLM_URL` | `http://127.0.0.1:11441` | チャットモデル (mlx-serve) のエンドポイント。GM / NPC / Support 共通 |
+| `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | 全リクエストに付ける `model`。mlx-serve のプロファイル名と一致させる |
+| `LLM_TIMEOUT_SEC` | `300` | LLM 1 リクエストのタイムアウト (秒) |
+| `STAGE_RETRY_LIMIT` | `2` | 検証 NG の段を再思考させる回数 (0 で再試行なし) |
+| `EMBED_URL` | `http://127.0.0.1:11455` | 埋め込みモデル (mlx-serve) のエンドポイント |
+| `EMBED_MODEL_ID` | `bge-m3-q8` | 埋め込みリクエストに付ける `model` |
 | `PERSONAS_DIR` | `data/personas` | NPC ペルソナ YAML ファイルのディレクトリ |
+
+> `LLM_MODEL_ID` / `EMBED_MODEL_ID` は mlx-serve のプロファイルの `model_id` と一致させてください。mlx-vlm は `model` がないと 422 を返し、別の名前を送ると常駐モデルを入れ替えて再ロードします。
 
 ---
 
 ## バッチツール (Batch Tools)
 
-`ai-agents/` 以下の Python スクリプトはオフラインメンテナンス用です。
+`ai-agents/` 以下の Python スクリプトはオフラインメンテナンス用です。LLM は mlx-serve の OpenAI 互換 API (`/v1/chat/completions`・`/v1/embeddings`) で呼び出します (共通モジュール `ai-agents/mlx_client.py`)。
 
 ### ルールブックのインポート
 
@@ -207,15 +229,16 @@ uv run ai-agents/ocr_rulebook.py <file> [--source-type rulebook|correction|house
 ### 埋め込みベクターの生成
 
 ```bash
-uv run ai-agents/embed_chunks.py [--db PATH] [--embed-url URL] [--batch 32]
+uv run ai-agents/embed_chunks.py [--db PATH] [--embed-url URL] [--embed-model-id ID] [--batch 32] [--reembed-all]
 ```
 
-- `rag_chunks` テーブルの未埋め込みチャンクを一括処理
+- `rag_chunks` / `rag_chunks_opt` テーブルの未埋め込み行をすべて処理 (`--batch` 件ごとにコミット)
+- `--reembed-all`: 既存の埋め込みを消して全件作り直す (埋め込みモデルを変えたとき)
 
 ### チャンクの最適化
 
 ```bash
-uv run ai-agents/optimize_chunks.py [--db PATH]
+uv run ai-agents/optimize_chunks.py [--db PATH] [--model-url URL] [--model-id ID] [--embed-url URL] [--embed-model-id ID]
 ```
 
 - LLM でチャンクテキストを書き換え、RAG の検索精度を向上
@@ -223,10 +246,12 @@ uv run ai-agents/optimize_chunks.py [--db PATH]
 ### シナリオのバッチ生成
 
 ```bash
-uv run ai-agents/generate_scenarios.py [--count N] [--rank A-E] [--model-url URL] [--comfy-url URL] [--db PATH]
+uv run ai-agents/generate_scenarios.py [--count N] [--rank A-E] [--model-url URL] [--model-id ID] [--comfy-url URL] [--db PATH]
 ```
 
 - LLM でシナリオ JSON を生成し、ComfyUI で画像を生成して DB に保存
+
+既定の接続先は `--model-url http://127.0.0.1:11441` / `--model-id gemma4-31b-it-heretic-4bit-mtp`、`--embed-url http://127.0.0.1:11455` / `--embed-model-id bge-m3-q8` です。
 
 ---
 
@@ -251,7 +276,9 @@ go test ./...
 | `orchestrator/cmd/server/main.go` | エントリーポイント |
 | `orchestrator/pkg/api/handler.go` | HTTP / WebSocket ルーター |
 | `orchestrator/pkg/game/turn.go` | ターン処理ロジック |
-| `orchestrator/pkg/llm/client.go` | llama-server クライアント |
+| `orchestrator/pkg/game/stage.go` | 段ごとの呼び出し・検証・再思考 |
+| `orchestrator/pkg/game/validate.go` | GM / NPC / Support 出力の検証 |
+| `orchestrator/pkg/llm/client.go` | mlx-serve (OpenAI 互換) クライアント |
 | `orchestrator/pkg/rag/engine.go` | ベクター検索エンジン |
 | `orchestrator/pkg/db/schema.sql` | SQLite スキーマ |
 
@@ -298,6 +325,8 @@ uv run <script>.py --help
 | [docs/maintenance_en.md](docs/maintenance_en.md) | Maintenance Guide (English) |
 | [docs/tools_ja.md](docs/tools_ja.md) | バッチツールリファレンス (日本語) |
 | [docs/tools_en.md](docs/tools_en.md) | Batch Tools Reference (English) |
+| [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
+| [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
 
 ---
 

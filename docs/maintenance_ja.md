@@ -8,18 +8,31 @@
 
 ### 1.1 セッション開始
 
+LLM は mlx-serve（`/Users/kf/AI/MLX`）が提供します。Omni-Master の起動スクリプトは mlx-serve を起動しないため、先に次の 2 プロファイルを起動しておきます。
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 埋め込み
+pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # 稼働確認
+```
+
+続いて Omni-Master を起動します（PowerShell 7）。
+
 ```bash
 # プロジェクトルートで実行
-cd /Users/kf/Work/sw25-omni-master
-./start.sh
+cd /Users/kf/AI/SW2.5-Omni-Master
+pwsh scripts/Start-Omni.ps1           # ログを追従する場合は -Follow
 ```
 
 起動順序:
-1. `llama-server` x6（GM/Support/NPC×3/Embed）
-2. 初期化待機 10秒
-3. Go オーケストレーター（自動ビルド）
-4. Vite UI dev server
-5. 全ログを `tail -f` で表示
+1. `config.env` の `LLM_URL` / `EMBED_URL` の `/health` を確認（応答がなければ起動すべき `Start-MlxServe.ps1` コマンドを表示して終了）
+2. Go オーケストレーター（ビルド後に起動）
+3. Vite UI dev server
+4. `-Follow` 指定時は `logs/orchestrator.log` と `logs/ui.log` を `tail -f` で表示
+
+PID は `.pids` に記録されます。`.pids` が残っている場合は二重起動を防ぐため起動しません（先に `Stop-Omni.ps1` を実行）。
+
+> `start.sh` / `stop.sh` は旧構成（llama-server を直接起動）用のスクリプトで、非推奨です。今後削除します。
 
 起動確認:
 - UI: `http://localhost:5173`
@@ -28,24 +41,23 @@ cd /Users/kf/Work/sw25-omni-master
 ### 1.2 セッション終了
 
 ```bash
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 ```
 
-ポートを直接 LISTEN しているプロセスを特定して SIGTERM → 1秒後に SIGKILL。`.pids` ファイルも削除。
+UI（:5173）とオーケストレーター（`ADDR` のポート）を LISTEN しているプロセスを特定して SIGTERM → 1秒後に SIGKILL。`.pids` に残った PID も停止し、`.pids` ファイルを削除します。mlx-serve のプロファイルは停止しません。mlx-serve も止める場合:
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+```
 
 ### 1.3 ログ確認
 
 ```bash
-# リアルタイム（start.sh が自動で表示）
-tail -f logs/orchestrator.log
-tail -f logs/gm.log
-tail -f logs/ui.log
-
-# LLM 全ログ
-tail -f logs/gm.log logs/support.log \
-        logs/npc-a.log logs/npc-b.log logs/npc-c.log \
-        logs/embed.log
+# リアルタイム（Start-Omni.ps1 -Follow で自動表示）
+tail -f logs/orchestrator.log logs/ui.log
 ```
+
+LLM の推論ログは mlx-serve 側にあります（mlx-serve の README を参照）。各段の出力と再思考の履歴（`[NG 1/3] ...`）は `session_logs` テーブルに記録されます。
 
 ---
 
@@ -134,17 +146,26 @@ sqlite3 data/omni.db \
 インポート直後はベクトルが未生成（embedding=NULL）です。RAG 検索には埋め込みが必要です。
 
 ```bash
-# 埋め込みサーバーが起動していることを確認（ポート 11435）
+# mlx-serve の bge-m3-q8 が起動していることを確認（ポート 11455）
 uv run ai-agents/embed_chunks.py \
     --db data/omni.db \
-    --embed-url http://localhost:11435 \
+    --embed-url http://127.0.0.1:11455 \
     --batch 50
 ```
+
+`rag_chunks` と `rag_chunks_opt` の未埋め込み行をすべて処理します。
 
 進捗確認:
 
 ```bash
-uv run ai-agents/embed_chunks.py --db data/omni.db --status
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks WHERE embedding IS NULL;"
+```
+
+埋め込みモデルを変更した場合はベクトルの次元が変わる（例: 768 → 1024）ため、既存の埋め込みを消して全件を作り直します。
+
+```bash
+uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
 ```
 
 ### 3.3 チャンクを最適化する（任意・推奨）
@@ -158,8 +179,8 @@ uv run ai-agents/optimize_chunks.py --status
 # バッチ実行（1回 20 件ずつ、システム未使用時間帯に実行推奨）
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
-    --model-url http://localhost:11430 \
-    --embed-url http://localhost:11435
+    --model-url http://127.0.0.1:11441 \
+    --embed-url http://127.0.0.1:11455
 
 # 失敗したチャンクを再処理
 uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
@@ -218,7 +239,6 @@ curl -X POST http://localhost:8080/api/rules \
 ```yaml
 id: new_npc
 name: キャラクター名
-port: 11432         # 11432〜11434 のいずれか（既存ペルソナと被らせない）
 race: 人族
 classes:
   - name: ソーサラー
@@ -241,7 +261,7 @@ persona:
 
 ### 4.2 ペルソナを更新する
 
-YAML ファイルを直接編集した後、セッションを再起動してください（`./stop.sh && ./start.sh`）。
+YAML ファイルを直接編集した後、セッションを再起動してください（`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`）。
 
 セッション中の緊急修正（DEV モード）:
 1. UI ヘッダーの「DEV MODE」をオン
@@ -422,22 +442,34 @@ cd ui && npm run dev -- --host
 ### LLM が応答しない
 
 ```bash
-# 各サーバーの起動状況確認
-curl http://localhost:11430/health
-curl http://localhost:11435/health
+# mlx-serve の起動状況確認
+curl http://127.0.0.1:11441/health    # チャットモデル
+curl http://127.0.0.1:11455/health    # 埋め込み
+pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1
 
-# ログ確認
-tail -50 logs/gm.log
-tail -50 logs/embed.log
+# 止まっているプロファイルを起動
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 
-# 個別に再起動
-llama-server \
-  --model /path/to/model.gguf \
-  --port 11430 --host 127.0.0.1 \
-  --ctx-size 4096 --n-gpu-layers 99
+# オーケストレーターの起動時チェック結果
+grep mlx-serve logs/orchestrator.log
 ```
 
-### RAG 検索が機能しない（埋め込みがない）
+- `LLM_MODEL_ID` / `EMBED_MODEL_ID` が mlx-serve のプロファイル名と一致しているか確認してください。mlx-vlm は `model` がないと 422 を返し、別の名前を送ると常駐モデルを再ロードします。
+
+### NPC が行動しない / HP・MP がそのまま適用される
+
+段ごとの検証に通らなかった場合、`TurnResult` の `warnings` に理由が入ります（NPC はそのターンを見送り、Support が NG なら NPC 自身の `hp_delta` / `mp_cost` を使用）。`stage_attempts` で段ごとの呼び出し回数を確認できます。
+
+```bash
+# 却下された出力とエラーを確認
+sqlite3 data/omni.db \
+  "SELECT turn, role, substr(content,1,200) FROM session_logs WHERE content LIKE '[NG %' ORDER BY id DESC LIMIT 20;"
+```
+
+再思考の回数は `config.env` の `STAGE_RETRY_LIMIT`（既定 2）で調整できます。
+
+### RAG 検索が機能しない（埋め込みがない・次元が合わない）
 
 ```bash
 # 埋め込み未生成チャンクを確認
@@ -446,14 +478,18 @@ sqlite3 data/omni.db \
 
 # 埋め込みを生成
 uv run ai-agents/embed_chunks.py \
-    --embed-url http://localhost:11435
+    --embed-url http://127.0.0.1:11455
+
+# 埋め込みモデルを変えた後（旧ベクトルと次元が違う）は全件作り直す
+uv run ai-agents/embed_chunks.py --reembed-all
 ```
 
 ### ターン処理がタイムアウトする
 
 - UI 側タイムアウト: 180秒（`SessionView.tsx` の `AbortSignal.timeout(180000)`）
-- `MODEL_GM` のモデルサイズを小さいものに変更
-- `--ctx-size` を `2048` に削減
+- LLM 1 リクエストのタイムアウト: `config.env` の `LLM_TIMEOUT_SEC`（既定 300秒）
+- 全段が 1 モデルで直列に動くため、ターン時間は GM + NPC 数 + Support の合計になります。再思考が起きるとその分長くなります（`stage_attempts` で確認）
+- 時間を優先する場合は `STAGE_RETRY_LIMIT` を減らします
 
 ### ComfyUI 画像が生成されない
 
@@ -475,23 +511,18 @@ grep COMFY_URL config.env
 sqlite3 data/omni.db "PRAGMA wal_checkpoint(FULL);"
 
 # -shm / -wal ファイルを削除（全サービス停止後）
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 rm -f data/omni.db-shm data/omni.db-wal
-./start.sh
+pwsh scripts/Start-Omni.ps1
 ```
 
-### llama-server が見つからない
+### Start-Omni.ps1 が「mlx-serve で次のプロファイルを起動してから」と表示して終了する
 
-```bash
-# PATH に追加されているか確認
-which llama-server
+`LLM_URL` または `EMBED_URL` の `/health` が応答していません。表示された `Start-MlxServe.ps1` コマンドでプロファイルを起動してから、もう一度実行してください。
 
-# config.env でフルパスを指定
-echo "LLAMA_SERVER=/usr/local/bin/llama-server" >> config.env
+### Start-Omni.ps1 が「前回の .pids を検出」と表示して終了する
 
-# または LM Studio のバンドル版を使う場合
-echo "LLAMA_SERVER=/Applications/LM Studio.app/Contents/Resources/llama-server" >> config.env
-```
+前回の停止が完了していません。`pwsh scripts/Stop-Omni.ps1` を実行してから起動してください。
 
 ---
 
@@ -515,10 +546,6 @@ echo "LLAMA_SERVER=/Applications/LM Studio.app/Contents/Resources/llama-server" 
 |----------|--------|------|
 | Vite UI | 5173 | フロントエンド開発サーバー |
 | Go Orchestrator | 8080 | REST API + WebSocket |
-| GM LLM | 11430 | GM役（Gemma-4B相当） |
-| Support LLM | 11431 | バリデーション・リソース計算 |
-| NPC-A LLM | 11432 | NPC 1体目 |
-| NPC-B LLM | 11433 | NPC 2体目 |
-| NPC-C LLM | 11434 | NPC 3体目 |
-| Embed LLM | 11435 | ベクトル埋め込み生成 |
+| mlx-serve `gemma4-31b-it-heretic-4bit-mtp` | 11441 | GM・NPC・サポート共通のチャットモデル（mlx-serve が管理） |
+| mlx-serve `bge-m3-q8` | 11455 | ベクトル埋め込み生成（mlx-serve が管理） |
 | ComfyUI | 8188 | 画像生成（Windows 側） |

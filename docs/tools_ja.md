@@ -2,15 +2,17 @@
 
 > バージョン: 1.0 / 言語: 日本語
 
-本ドキュメントでは、プロジェクト付属のシェルスクリプトおよび Python ユーティリティの詳細な使い方を説明します。
+本ドキュメントでは、プロジェクト付属のシェル / PowerShell スクリプトおよび Python ユーティリティの詳細な使い方を説明します。
+
+LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-serve（`/Users/kf/AI/MLX`）が提供します。本プロジェクトのスクリプトは LLM プロセスを起動しません。
 
 ---
 
 ## 目次
 
 1. [setup.sh — 初期構築・リセット](#1-setupsh)
-2. [start.sh — 全サービス起動](#2-startsh)
-3. [stop.sh — 全サービス停止](#3-stopsh)
+2. [Start-Omni.ps1 — サービス起動](#2-start-omnips1)
+3. [Stop-Omni.ps1 — サービス停止](#3-stop-omnips1)
 4. [ocr_rulebook.py — ルールブックインポート](#4-ocr_rulebookpy)
 5. [embed_chunks.py — 埋め込みベクトル生成](#5-embed_chunkspy)
 6. [optimize_chunks.py — チャンク最適化](#6-optimize_chunkspy)
@@ -81,71 +83,66 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 # フルリセット後のルールブックインポート例
 ./setup.sh --full
 uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md --db data/omni.db
-uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://localhost:11435
+uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
 
 ---
 
-## 2. start.sh
+## 2. Start-Omni.ps1
 
-全サービスをバックグラウンドで起動し、ログをリアルタイム表示します。
+Go オーケストレーターと Vite UI をバックグラウンドで起動します（PowerShell 7）。mlx-serve は起動しません。
 
 ### 概要
 
 ```
-./start.sh
+pwsh scripts/Start-Omni.ps1 [-Follow]
 ```
 
-引数はありません。すべての設定は `config.env` から読み込まれます。
+| オプション | 説明 |
+|-----------|------|
+| `-Follow` | 起動後にログを `tail -f` で表示（Ctrl+C で表示だけ終了し、サービスは動き続ける） |
+
+その他の設定はすべて `config.env` から読み込まれます（OS 環境変数 > config.env > デフォルト値）。
 
 ### 起動順序
 
-1. `llama-server` ×6 を順次起動:
-   - `gm`（ポート 11430、`MODEL_GM` を使用）
-   - `support`（ポート 11431、`MODEL_NPC` を使用）
-   - `npc-a`（ポート 11432、`MODEL_NPC` を使用）
-   - `npc-b`（ポート 11433、`MODEL_NPC` を使用）
-   - `npc-c`（ポート 11434、`MODEL_NPC` を使用）
-   - `embed`（ポート 11435、`MODEL_EMBED` を使用）
-2. 10秒待機（LLM の初期化時間）
-3. Go オーケストレーターをビルドして起動（ポート 8080）
+1. `.pids` が残っていれば終了（二重起動防止。先に `Stop-Omni.ps1` を実行）
+2. `LLM_URL` と `EMBED_URL` の `/health` を確認。応答がないプロファイルがあれば、次のような起動コマンドを表示して終了:
+   ```
+   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+   ```
+3. Go オーケストレーターをビルド（`.bin/orchestrator`）して起動（`ADDR`、既定 8080）
 4. Vite UI dev server 起動（ポート 5173）
-5. 全ログを `tail -f` で表示
+5. 両ポートの待ち受けを最大 30 秒確認し、接続先の一覧を表示
 
 ### 前提条件
 
-- `config.env` が存在すること
-- `.pids` ファイルが存在しないこと（存在する場合は `stop.sh` を先に実行）
-- DB ファイルが存在しない場合は自動的に初期化
+- PowerShell 7（`pwsh`）
+- `config.env` が存在すること（`config.env.example` をコピーして作成）
+- mlx-serve で `LLM_MODEL_ID` / `EMBED_MODEL_ID` のプロファイルが起動していること
+- `.pids` ファイルが存在しないこと
 
 ### config.env の主要な設定値
 
 ```bash
-# LLM モデルのファイルパス
-MODEL_GM=/path/to/gm_model.gguf
-MODEL_NPC=/path/to/npc_model.gguf
-MODEL_EMBED=/path/to/embed_model.gguf
-
-# llama-server のパス（PATH に含まれている場合は不要）
-LLAMA_SERVER=/usr/local/bin/llama-server
-
 # オーケストレーターのリッスンアドレス
 ADDR=:8080
 
 # DB パス
-DB_PATH=/Users/kf/Work/sw25-omni-master/data/omni.db
+DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
 # ComfyUI URL（画像生成。空文字で無効化）
 COMFY_URL=http://192.168.1.10:8188
 
-# LLM モデルの設定（オーケストレーター経由で渡す）
-MODEL_GM_URL=http://localhost:11430
-MODEL_SUPPORT_URL=http://localhost:11431
+# チャットモデル（GM / NPC / Support 共通、mlx-serve）
+LLM_URL=http://127.0.0.1:11441
+LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+
+# 埋め込み（RAG、mlx-serve）
+EMBED_URL=http://127.0.0.1:11455
+EMBED_MODEL_ID=bge-m3-q8
 ```
-
-### モデルが見つからない場合
-
-モデルファイルが存在しないサーバーはスキップされ、該当ロールへの API 呼び出しは失敗します。`llama-server` コマンドが見つからない場合は全 LLM サーバーをスキップして起動します（デバッグ目的）。
 
 ### ログファイル
 
@@ -153,42 +150,44 @@ MODEL_SUPPORT_URL=http://localhost:11431
 |--------|--------|
 | `logs/orchestrator.log` | Go オーケストレーター |
 | `logs/ui.log` | Vite dev server |
-| `logs/gm.log` | GM LLM |
-| `logs/support.log` | Support LLM |
-| `logs/npc-a.log` | NPC-A LLM |
-| `logs/npc-b.log` | NPC-B LLM |
-| `logs/npc-c.log` | NPC-C LLM |
-| `logs/embed.log` | Embed LLM |
+
+LLM の推論ログは mlx-serve 側にあります。
 
 ### PID 管理
 
-起動したプロセスの PID は `.pids` ファイルに記録されます。`stop.sh` はこのファイルと実際のポートリスナーの両方を使って確実に停止します。
+起動したプロセスの PID は `.pids` ファイルに記録されます。`Stop-Omni.ps1` はこのファイルと実際のポートリスナーの両方を使って確実に停止します。
+
+### 旧スクリプト
+
+`start.sh` / `stop.sh` は旧構成（llama-server を直接起動）用で、非推奨です。今後削除します。
 
 ---
 
-## 3. stop.sh
+## 3. Stop-Omni.ps1
 
-全サービスを停止します。
+Go オーケストレーターと Vite UI を停止します。mlx-serve のプロファイルは停止しません。
 
 ### 概要
 
 ```
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 ```
 
 引数はありません。
 
 ### 動作の詳細
 
-各ポートを `lsof -ti:<port>` で特定し、SIGTERM → 1秒後に SIGKILL（生き残っている場合）の順で停止します。
-
-停止対象ポート: 5173, 8080, 11430, 11431, 11432, 11433, 11434, 11435
+ポート 5173（UI）と `ADDR` のポート（オーケストレーター）を LISTEN しているプロセスを `lsof` で特定し、SIGTERM → 1秒後に SIGKILL（生き残っている場合）の順で停止します。
 
 `.pids` ファイルに記録された PID も追加で確認して停止します。最後に `.pids` ファイルを削除します。
 
 ### 注意
 
-`llama-server` が応答しなくなった場合は `stop.sh` を実行してから `start.sh` を再実行してください。
+mlx-serve も停止する場合は mlx-serve 側のスクリプトを使います。
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+```
 
 ---
 
@@ -280,7 +279,7 @@ uv run ai-agents/ocr_rulebook.py \
 
 ## 5. embed_chunks.py
 
-`rag_chunks` テーブル内の埋め込みが未生成のチャンクにベクトルを生成します。
+`rag_chunks` と `rag_chunks_opt` テーブル内の埋め込みが未生成の行にベクトルを生成します。
 
 ### 概要
 
@@ -291,54 +290,46 @@ uv run ai-agents/embed_chunks.py [オプション]
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
 | `--db` | `data/omni.db` | DB ファイルパス |
-| `--embed-url` | `http://localhost:11435` | 埋め込み LLM の URL |
-| `--batch` | `32` | 1回の実行で処理するチャンク数 |
-| `--status` | — | 処理状況を表示して終了 |
+| `--embed-url` | `http://127.0.0.1:11455` | mlx-serve 埋め込みプロファイルの URL |
+| `--embed-model-id` | `bge-m3-q8` | 埋め込みプロファイルの model ID（リクエストの `model`） |
+| `--batch` | `32` | 1回のコミットで処理する件数 |
+| `--reembed-all` | — | 既存の埋め込みをすべて消して（`rag_chunks` / `rag_chunks_opt`）全件作り直す |
 
 ### 動作の詳細
 
-1. `rag_chunks WHERE embedding IS NULL` を `--batch` 件取得
-2. 各チャンクのテキストを `{embed_url}/embedding` に POST
-3. 返ってきたベクトル（float32 配列）を BLOB として `embedding` カラムに保存
+1. `--reembed-all` 指定時は `rag_chunks` と `rag_chunks_opt` の `embedding` をすべて NULL に戻す
+2. 各テーブルの `embedding IS NULL` の行を `--batch` 件ずつ取得
+3. 各行のテキストを `{embed_url}/v1/embeddings` に `{"model": <embed-model-id>, "input": <text>}` で POST
+4. 返ってきたベクトル（float32 配列）を BLOB として `embedding` カラムに保存し、`--batch` 件ごとにコミット
+5. 未処理の行がなくなるまで繰り返す（失敗した行は NULL のまま残し、警告を表示）
 
-埋め込みサーバー（ポート 11435）が起動していることが前提です。`start.sh` 起動中に実行するか、単独で `llama-server` の embed モデルを起動してください。
+開始時に `{embed_url}/health` を確認し、応答がなければ `Start-MlxServe.ps1` の起動コマンドを表示して終了します。
+
+### 埋め込みモデルを変更したとき
+
+モデルを変えるとベクトルの次元が変わります（例: nomic-embed の 768 次元 → bge-m3 の 1024 次元）。古いベクトルと混在すると検索できないため、全件を作り直してください。
+
+```bash
+uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
+```
 
 ### 状況確認
 
 ```bash
-uv run ai-agents/embed_chunks.py --status
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks WHERE embedding IS NULL;"
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks_opt WHERE embedding IS NULL;"
 ```
 
-出力例:
-```
-[embed] 状況:
-  処理済み: 1234
-  未処理:   56
-  合計:     1290
-```
-
-### 全チャンクを処理する
-
-バッチサイズを大きくして複数回実行します。
+### 実行例
 
 ```bash
-# 100件ずつ処理（繰り返し実行）
+# 未埋め込みの行をすべて処理
 uv run ai-agents/embed_chunks.py \
     --db data/omni.db \
-    --embed-url http://localhost:11435 \
+    --embed-url http://127.0.0.1:11455 \
     --batch 100
-```
-
-全チャンクを一括処理するシェルループ:
-
-```bash
-while uv run ai-agents/embed_chunks.py \
-    --db data/omni.db \
-    --embed-url http://localhost:11435 \
-    --batch 50 | grep -q "チャンクを処理"; do
-  sleep 1
-done
-echo "全チャンク処理完了"
 ```
 
 ---
@@ -356,8 +347,10 @@ uv run ai-agents/optimize_chunks.py [オプション]
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
 | `--limit` | `20` | 1回の実行で処理する最大チャンク数 |
-| `--model-url` | `http://localhost:11430` | テキスト最適化 LLM の URL |
-| `--embed-url` | `http://localhost:11435` | 埋め込み LLM の URL |
+| `--model-url` | `http://127.0.0.1:11441` | テキスト最適化 LLM（mlx-serve）の URL |
+| `--model-id` | `gemma4-31b-it-heretic-4bit-mtp` | テキスト最適化 LLM の model ID |
+| `--embed-url` | `http://127.0.0.1:11455` | 埋め込み LLM（mlx-serve）の URL |
+| `--embed-model-id` | `bge-m3-q8` | 埋め込み LLM の model ID |
 | `--db` | `data/omni.db` | DB ファイルパス |
 | `--dry-run` | — | DB/ファイルを更新せず処理内容だけ表示 |
 | `--retry-failed` | — | `failed` ステータスのチャンクを再処理 |
@@ -368,7 +361,7 @@ uv run ai-agents/optimize_chunks.py [オプション]
 
 ```
 rag_chunks (原文)
-    ↓ LLM に送信（OPTIMIZE_PROMPT）
+    ↓ LLM に送信（OPTIMIZE_PROMPT、/v1/chat/completions）
     ↓ JSON レスポンス解析
 rag_chunks_opt (最適化済みテキスト + tag + summary)
     ↓ embed_chunks.py と同様の処理
@@ -414,8 +407,8 @@ uv run ai-agents/optimize_chunks.py --status
 # 50件バッチ処理（システム未使用時間帯に推奨）
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
-    --model-url http://localhost:11430 \
-    --embed-url http://localhost:11435
+    --model-url http://127.0.0.1:11441 \
+    --embed-url http://127.0.0.1:11455
 
 # 失敗チャンクを再処理
 uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
@@ -423,15 +416,17 @@ uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
 # 特定チャンクのドライラン（デバッグ）
 uv run ai-agents/optimize_chunks.py --chunk-id 42 --dry-run
 
-# GM LLM が起動していない場合は別途 llama-server を起動して指定
+# 別の mlx-serve プロファイルを使う場合は URL と model ID を指定
 uv run ai-agents/optimize_chunks.py \
-    --model-url http://192.168.1.10:11430 \
+    --model-url http://127.0.0.1:<port> \
+    --model-id <profile> \
     --limit 100
 ```
 
 ### 注意事項
 
-- GM LLM（デフォルト 11430）と Embed LLM（11435）の両方が稼働している必要があります
+- mlx-serve のチャットモデル（デフォルト 11441）と埋め込みモデル（11455）の両方が稼働している必要があります
+- リクエストには必ず `model`（model ID）、ランダムな `seed`、thinking 無効化フラグが付きます（共通モジュール `ai-agents/mlx_client.py`）。model ID が mlx-serve のプロファイルと違うと、mlx-serve 側で常駐モデルが入れ替わります
 - ゲームセッション中の実行はパフォーマンスに影響する可能性があります。システム未使用時間帯（深夜など）に実行することを推奨します
 - 1チャンクあたり約 3〜10秒かかります（モデルの速度に依存）
 
@@ -451,7 +446,8 @@ uv run ai-agents/generate_scenarios.py [オプション]
 |-----------|-----------|------|
 | `--count N` | `1` | 生成するシナリオ数 |
 | `--rank RANK` | `C` | ランク（A/B/C/D/E） |
-| `--model-url URL` | `http://localhost:11430` | テキスト生成 LLM の URL |
+| `--model-url URL` | `http://127.0.0.1:11441` | テキスト生成 LLM（mlx-serve）の URL |
+| `--model-id ID` | `gemma4-31b-it-heretic-4bit-mtp` | テキスト生成 LLM の model ID |
 | `--comfy-url URL` | （なし） | ComfyUI の URL。省略すると画像生成なし |
 | `--comfy-model NAME` | （自動検出） | 使用 checkpoint モデル名 |
 | `--db PATH` | `data/omni.db` | DB ファイルパス |
@@ -582,7 +578,7 @@ uv run ai-agents/generate_scenarios.py \
 ```bash
 # crontab -e に追加
 # 毎日午前2時に Cランクシナリオを2本自動生成
-0 2 * * * cd /Users/kf/Work/sw25-omni-master && \
+0 2 * * * cd /Users/kf/AI/SW2.5-Omni-Master && \
     uv run ai-agents/generate_scenarios.py \
     --count 2 --rank C --no-images --publish-quest \
     >> logs/generate_scenarios.log 2>&1
@@ -590,7 +586,7 @@ uv run ai-agents/generate_scenarios.py \
 
 ### 注意事項
 
-- GM LLM（デフォルト 11430）が稼働している必要があります（テキスト生成に使用）
+- mlx-serve のチャットモデル（デフォルト 11441、`/v1/chat/completions`）が稼働している必要があります（テキスト生成に使用）
 - ComfyUI を使用する場合、Windows 側の ComfyUI が起動していることを確認してください
 - `--no-images` を付けると ComfyUI なしで実行できます
 - `--publish-quest` で生成されたシナリオは UI の QUEST BOARD に即座に表示されます
@@ -617,27 +613,23 @@ uv sync
 
 ## config.env テンプレート
 
+`config.env.example` をコピーして作成します（`cp config.env.example config.env`）。主なキー:
+
 ```bash
-# モデルパス
-MODEL_GM=/path/to/models/gemma-4b-q4.gguf
-MODEL_NPC=/path/to/models/gemma-4b-q4.gguf
-MODEL_EMBED=/path/to/models/nomic-embed.gguf
-
-# llama-server の場所（PATH に含まれていれば不要）
-# LLAMA_SERVER=/usr/local/bin/llama-server
-
 # API サーバー
 ADDR=:8080
-DB_PATH=/Users/kf/Work/sw25-omni-master/data/omni.db
-
-# LLM エンドポイント（オーケストレーターが参照）
-MODEL_GM_URL=http://localhost:11430
-MODEL_SUPPORT_URL=http://localhost:11431
-MODEL_NPC_A_URL=http://localhost:11432
-MODEL_NPC_B_URL=http://localhost:11433
-MODEL_NPC_C_URL=http://localhost:11434
-MODEL_EMBED_URL=http://localhost:11435
+DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
 # ComfyUI（空文字で無効化）
 COMFY_URL=http://192.168.1.10:8188
+
+# チャットモデル（mlx-serve、GM / NPC / Support 共通）
+LLM_URL=http://127.0.0.1:11441
+LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+LLM_TIMEOUT_SEC=300
+STAGE_RETRY_LIMIT=2
+
+# 埋め込み（mlx-serve、RAG）
+EMBED_URL=http://127.0.0.1:11455
+EMBED_MODEL_ID=bge-m3-q8
 ```

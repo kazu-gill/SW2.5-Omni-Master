@@ -2,15 +2,17 @@
 
 > Version: 1.0 / Language: English
 
-This document describes the shell scripts and Python utilities bundled with the project.
+This document describes the shell / PowerShell scripts and Python utilities bundled with the project.
+
+The LLMs (chat and embeddings) are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform. The scripts in this project do not launch any LLM process.
 
 ---
 
 ## Table of Contents
 
 1. [setup.sh — Initial Setup and Reset](#1-setupsh)
-2. [start.sh — Start All Services](#2-startsh)
-3. [stop.sh — Stop All Services](#3-stopsh)
+2. [Start-Omni.ps1 — Start Services](#2-start-omnips1)
+3. [Stop-Omni.ps1 — Stop Services](#3-stop-omnips1)
 4. [ocr_rulebook.py — Rulebook Import](#4-ocr_rulebookpy)
 5. [embed_chunks.py — Embedding Vector Generation](#5-embed_chunkspy)
 6. [optimize_chunks.py — Chunk Optimization](#6-optimize_chunkspy)
@@ -81,71 +83,66 @@ Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
 # After a full reset, re-import the rulebook
 ./setup.sh --full
 uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md --db data/omni.db
-uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://localhost:11435
+uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
 
 ---
 
-## 2. start.sh
+## 2. Start-Omni.ps1
 
-Starts all services in the background and tails logs in real time.
+Starts the Go orchestrator and the Vite UI in the background (PowerShell 7). It does not start mlx-serve.
 
 ### Synopsis
 
 ```
-./start.sh
+pwsh scripts/Start-Omni.ps1 [-Follow]
 ```
 
-No arguments. All configuration is read from `config.env`.
+| Option | Description |
+|--------|-------------|
+| `-Follow` | Tail the logs after startup (Ctrl+C stops only the tail; services keep running) |
+
+All other settings are read from `config.env` (OS environment variable > config.env > default).
 
 ### Startup Sequence
 
-1. Launch `llama-server` ×6 sequentially:
-   - `gm` (port 11430, uses `MODEL_GM`)
-   - `support` (port 11431, uses `MODEL_NPC`)
-   - `npc-a` (port 11432, uses `MODEL_NPC`)
-   - `npc-b` (port 11433, uses `MODEL_NPC`)
-   - `npc-c` (port 11434, uses `MODEL_NPC`)
-   - `embed` (port 11435, uses `MODEL_EMBED`)
-2. Wait 10 seconds for LLM initialization
-3. Build and launch the Go orchestrator (port 8080)
-4. Launch the Vite UI dev server (port 5173)
-5. Tail all logs
+1. Exit if `.pids` exists (prevents a double launch; run `Stop-Omni.ps1` first)
+2. Check `/health` of `LLM_URL` and `EMBED_URL`. If a profile is not answering, print the command to start it and exit, e.g.:
+   ```
+   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+   ```
+3. Build the Go orchestrator (`.bin/orchestrator`) and start it (`ADDR`, default 8080)
+4. Start the Vite UI dev server (port 5173)
+5. Wait up to 30 seconds for both ports to listen, then print the endpoints
 
 ### Prerequisites
 
-- `config.env` must exist
-- `.pids` must not exist (run `stop.sh` first if it does)
-- DB is auto-initialized if missing
+- PowerShell 7 (`pwsh`)
+- `config.env` must exist (copy it from `config.env.example`)
+- The mlx-serve profiles named by `LLM_MODEL_ID` / `EMBED_MODEL_ID` must be running
+- `.pids` must not exist
 
-### Key config.env Settings
+### Key config.env Values
 
 ```bash
-# LLM model file paths
-MODEL_GM=/path/to/gm_model.gguf
-MODEL_NPC=/path/to/npc_model.gguf
-MODEL_EMBED=/path/to/embed_model.gguf
-
-# Full path to llama-server (not needed if on PATH)
-LLAMA_SERVER=/usr/local/bin/llama-server
-
 # Orchestrator listen address
 ADDR=:8080
 
 # Database path
-DB_PATH=/Users/kf/Work/sw25-omni-master/data/omni.db
+DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
-# ComfyUI URL (image generation — leave empty to disable)
+# ComfyUI URL (leave empty to disable image generation)
 COMFY_URL=http://192.168.1.10:8188
 
-# LLM endpoints (read by the orchestrator)
-MODEL_GM_URL=http://localhost:11430
-MODEL_SUPPORT_URL=http://localhost:11431
+# Chat model (shared by GM / NPC / Support, on mlx-serve)
+LLM_URL=http://127.0.0.1:11441
+LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+
+# Embeddings (RAG, on mlx-serve)
+EMBED_URL=http://127.0.0.1:11455
+EMBED_MODEL_ID=bge-m3-q8
 ```
-
-### When a Model Is Not Found
-
-Servers with missing model files are skipped. API calls to those roles will fail. If `llama-server` is not on `PATH`, all LLM servers are skipped (useful for debugging the UI without models).
 
 ### Log Files
 
@@ -153,42 +150,44 @@ Servers with missing model files are skipped. API calls to those roles will fail
 |------|---------|
 | `logs/orchestrator.log` | Go orchestrator |
 | `logs/ui.log` | Vite dev server |
-| `logs/gm.log` | GM LLM |
-| `logs/support.log` | Support LLM |
-| `logs/npc-a.log` | NPC-A LLM |
-| `logs/npc-b.log` | NPC-B LLM |
-| `logs/npc-c.log` | NPC-C LLM |
-| `logs/embed.log` | Embed LLM |
+
+LLM inference logs live on the mlx-serve side.
 
 ### PID Tracking
 
-Process PIDs are written to `.pids`. `stop.sh` uses both this file and live port lookups to ensure all processes are stopped.
+Process PIDs are written to `.pids`. `Stop-Omni.ps1` uses both this file and live port lookups to ensure all processes are stopped.
+
+### Legacy Scripts
+
+`start.sh` / `stop.sh` belong to the old setup (which launched llama-server directly). They are deprecated and will be removed.
 
 ---
 
-## 3. stop.sh
+## 3. Stop-Omni.ps1
 
-Stops all services.
+Stops the Go orchestrator and the Vite UI. mlx-serve profiles are not stopped.
 
 ### Synopsis
 
 ```
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 ```
 
 No arguments.
 
 ### Behavior
 
-For each managed port, uses `lsof -ti:<port>` to find the listening PID, sends SIGTERM, waits 1 second, then sends SIGKILL if the process is still alive.
+Finds the processes listening on port 5173 (UI) and the `ADDR` port (orchestrator) with `lsof`, sends SIGTERM, waits 1 second, then sends SIGKILL to any survivors.
 
-Managed ports: 5173, 8080, 11430, 11431, 11432, 11433, 11434, 11435
+PIDs recorded in `.pids` are also checked and stopped. The `.pids` file is removed at the end.
 
-Also checks any remaining PIDs in `.pids` and terminates them. Deletes `.pids` when done.
+### Note
 
-### Notes
+To stop mlx-serve as well, use mlx-serve's own script:
 
-If any server becomes unresponsive, run `stop.sh` and then `start.sh` to restart cleanly.
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+```
 
 ---
 
@@ -280,7 +279,7 @@ uv run ai-agents/ocr_rulebook.py \
 
 ## 5. embed_chunks.py
 
-Generates embedding vectors for chunks in `rag_chunks` that have no embedding yet.
+Generates vector embeddings for rows in `rag_chunks` and `rag_chunks_opt` that do not have one yet.
 
 ### Synopsis
 
@@ -290,45 +289,47 @@ uv run ai-agents/embed_chunks.py [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--db` | `data/omni.db` | Database file path |
-| `--embed-url` | `http://localhost:11435` | Embedding LLM URL |
-| `--batch` | `32` | Number of chunks to process per run |
-| `--status` | — | Show processing statistics and exit |
+| `--db PATH` | `data/omni.db` | Database file path |
+| `--embed-url URL` | `http://127.0.0.1:11455` | URL of the mlx-serve embedding profile |
+| `--embed-model-id ID` | `bge-m3-q8` | Model ID of the embedding profile (sent as `model`) |
+| `--batch N` | `32` | Rows per commit |
+| `--reembed-all` | — | Clear all existing embeddings (`rag_chunks` / `rag_chunks_opt`) and rebuild them |
 
 ### Behavior
 
-1. Fetches up to `--batch` rows where `embedding IS NULL`
-2. POSTs each chunk's text to `{embed_url}/embedding`
-3. Stores the returned float32 vector as a BLOB in the `embedding` column
+1. With `--reembed-all`, set every `embedding` in `rag_chunks` and `rag_chunks_opt` back to NULL
+2. Fetch rows `WHERE embedding IS NULL` from each table, `--batch` at a time
+3. POST each row's text to `{embed_url}/v1/embeddings` as `{"model": <embed-model-id>, "input": <text>}`
+4. Store the returned vector (float32 array) as a BLOB in the `embedding` column, committing every `--batch` rows
+5. Repeat until no pending rows remain (rows that fail stay NULL and a warning is printed)
 
-The embed server (port 11435) must be running. Start the system with `start.sh`, or launch `llama-server` separately with the embed model.
+At startup it checks `{embed_url}/health`; if the server does not answer, it prints the `Start-MlxServe.ps1` command to run and exits.
+
+### Changing the Embedding Model
+
+A different model produces vectors of a different dimension (e.g. 768 for nomic-embed → 1024 for bge-m3). Old and new vectors cannot be mixed, so rebuild them all:
+
+```bash
+uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
+```
 
 ### Check Status
 
 ```bash
-uv run ai-agents/embed_chunks.py --status
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks WHERE embedding IS NULL;"
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks_opt WHERE embedding IS NULL;"
 ```
 
-Sample output:
-```
-[embed] Status:
-  Done:    1234
-  Pending:   56
-  Total:   1290
-```
-
-### Processing All Chunks
-
-Run repeatedly with a large batch size, or use a loop:
+### Example
 
 ```bash
-while uv run ai-agents/embed_chunks.py \
+# Embed every pending row
+uv run ai-agents/embed_chunks.py \
     --db data/omni.db \
-    --embed-url http://localhost:11435 \
-    --batch 50 | grep -q "処理します"; do
-  sleep 1
-done
-echo "All chunks embedded"
+    --embed-url http://127.0.0.1:11455 \
+    --batch 100
 ```
 
 ---
@@ -346,8 +347,10 @@ uv run ai-agents/optimize_chunks.py [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `--limit N` | `20` | Max chunks to process per run |
-| `--model-url URL` | `http://localhost:11430` | Text optimization LLM URL |
-| `--embed-url URL` | `http://localhost:11435` | Embedding LLM URL |
+| `--model-url URL` | `http://127.0.0.1:11441` | Text optimization LLM URL (mlx-serve) |
+| `--model-id ID` | `gemma4-31b-it-heretic-4bit-mtp` | Text optimization LLM model ID |
+| `--embed-url URL` | `http://127.0.0.1:11455` | Embedding LLM URL (mlx-serve) |
+| `--embed-model-id ID` | `bge-m3-q8` | Embedding LLM model ID |
 | `--db PATH` | `data/omni.db` | Database file path |
 | `--dry-run` | — | Print results without writing to DB |
 | `--retry-failed` | — | Re-process chunks with `failed` status |
@@ -358,7 +361,7 @@ uv run ai-agents/optimize_chunks.py [options]
 
 ```
 rag_chunks (raw text)
-    ↓  LLM call (OPTIMIZE_PROMPT)
+    ↓  LLM call (OPTIMIZE_PROMPT, /v1/chat/completions)
     ↓  Parse JSON response
 rag_chunks_opt (optimized text + tag + summary)
     ↓  Re-embed
@@ -404,8 +407,8 @@ uv run ai-agents/optimize_chunks.py --status
 # Run 50-chunk batch (best during off-hours)
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
-    --model-url http://localhost:11430 \
-    --embed-url http://localhost:11435
+    --model-url http://127.0.0.1:11441 \
+    --embed-url http://127.0.0.1:11455
 
 # Retry failed chunks
 uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
@@ -413,15 +416,17 @@ uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
 # Dry-run for a single chunk (debug)
 uv run ai-agents/optimize_chunks.py --chunk-id 42 --dry-run
 
-# Use a remote LLM server
+# Use a different mlx-serve profile (pass both URL and model ID)
 uv run ai-agents/optimize_chunks.py \
-    --model-url http://192.168.1.10:11430 \
+    --model-url http://127.0.0.1:<port> \
+    --model-id <profile> \
     --limit 100
 ```
 
 ### Notes
 
-- Both the GM LLM (default port 11430) and Embed LLM (11435) must be running.
+- Both the mlx-serve chat model (default port 11441) and embedding model (11455) must be running.
+- Every request carries `model` (the model ID), a random `seed` and thinking-off flags (shared module `ai-agents/mlx_client.py`). If the model ID differs from the mlx-serve profile, mlx-serve swaps out its resident model.
 - Running during an active game session may impact LLM response times. Prefer off-hours execution.
 - Typical processing speed: 3–10 seconds per chunk, depending on model speed.
 
@@ -441,7 +446,8 @@ uv run ai-agents/generate_scenarios.py [options]
 |--------|---------|-------------|
 | `--count N` | `1` | Number of scenarios to generate |
 | `--rank RANK` | `C` | Difficulty rank (A/B/C/D/E) |
-| `--model-url URL` | `http://localhost:11430` | Text generation LLM URL |
+| `--model-url URL` | `http://127.0.0.1:11441` | Text generation LLM URL (mlx-serve) |
+| `--model-id ID` | `gemma4-31b-it-heretic-4bit-mtp` | Text generation LLM model ID |
 | `--comfy-url URL` | (none) | ComfyUI URL — omit to skip image generation |
 | `--comfy-model NAME` | (auto) | Checkpoint model name |
 | `--db PATH` | `data/omni.db` | Database file path |
@@ -569,7 +575,7 @@ uv run ai-agents/generate_scenarios.py \
 ```bash
 # Add to crontab -e
 # Generate 2 rank-C scenarios at 2am every night
-0 2 * * * cd /Users/kf/Work/sw25-omni-master && \
+0 2 * * * cd /Users/kf/AI/SW2.5-Omni-Master && \
     uv run ai-agents/generate_scenarios.py \
     --count 2 --rank C --no-images --publish-quest \
     >> logs/generate_scenarios.log 2>&1
@@ -577,7 +583,7 @@ uv run ai-agents/generate_scenarios.py \
 
 ### Notes
 
-- The GM LLM (default port 11430) must be running for text generation.
+- The mlx-serve chat model (default port 11441, `/v1/chat/completions`) must be running for text generation.
 - For image generation, ensure the Windows-side ComfyUI is running and reachable.
 - Use `--no-images` to run without ComfyUI.
 - Scenarios registered with `--publish-quest` appear immediately in the UI QUEST BOARD.
@@ -604,27 +610,23 @@ Dependencies are declared in `ai-agents/pyproject.toml` and managed automaticall
 
 ## config.env Template
 
+Create it from `config.env.example` (`cp config.env.example config.env`). Main keys:
+
 ```bash
-# Model paths
-MODEL_GM=/path/to/models/gemma-4b-q4.gguf
-MODEL_NPC=/path/to/models/gemma-4b-q4.gguf
-MODEL_EMBED=/path/to/models/nomic-embed.gguf
-
-# llama-server path (omit if it's on PATH)
-# LLAMA_SERVER=/usr/local/bin/llama-server
-
 # API server
 ADDR=:8080
-DB_PATH=/Users/kf/Work/sw25-omni-master/data/omni.db
-
-# LLM endpoints (read by the orchestrator)
-MODEL_GM_URL=http://localhost:11430
-MODEL_SUPPORT_URL=http://localhost:11431
-MODEL_NPC_A_URL=http://localhost:11432
-MODEL_NPC_B_URL=http://localhost:11433
-MODEL_NPC_C_URL=http://localhost:11434
-MODEL_EMBED_URL=http://localhost:11435
+DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
 # ComfyUI (leave empty to disable image generation)
 COMFY_URL=http://192.168.1.10:8188
+
+# Chat model (mlx-serve, shared by GM / NPC / Support)
+LLM_URL=http://127.0.0.1:11441
+LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+LLM_TIMEOUT_SEC=300
+STAGE_RETRY_LIMIT=2
+
+# Embeddings (mlx-serve, RAG)
+EMBED_URL=http://127.0.0.1:11455
+EMBED_MODEL_ID=bge-m3-q8
 ```

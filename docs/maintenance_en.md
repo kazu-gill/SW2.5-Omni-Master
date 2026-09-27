@@ -8,18 +8,31 @@
 
 ### 1.1 Starting a Session
 
+The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`). Omni-Master's start script does not launch mlx-serve, so start these two profiles first:
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 embeddings
+pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # check they are up
+```
+
+Then start Omni-Master (PowerShell 7):
+
 ```bash
 # Run from the project root
-cd /Users/kf/Work/sw25-omni-master
-./start.sh
+cd /Users/kf/AI/SW2.5-Omni-Master
+pwsh scripts/Start-Omni.ps1           # add -Follow to tail the logs
 ```
 
 Startup order:
-1. `llama-server` ×6 (GM / Support / NPC×3 / Embed)
-2. 10-second initialization wait
-3. Go orchestrator (auto-built)
-4. Vite UI dev server
-5. All logs tailed via `tail -f`
+1. Check `/health` of `LLM_URL` / `EMBED_URL` from `config.env` (if either is down, print the `Start-MlxServe.ps1` command to run and exit)
+2. Go orchestrator (built, then started)
+3. Vite UI dev server
+4. With `-Follow`, tail `logs/orchestrator.log` and `logs/ui.log`
+
+PIDs are recorded in `.pids`. If `.pids` is left over, the script refuses to start to avoid a double launch (run `Stop-Omni.ps1` first).
+
+> `start.sh` / `stop.sh` are legacy scripts from the old setup (which launched llama-server directly). They are deprecated and will be removed.
 
 Verification:
 - UI: `http://localhost:5173`
@@ -28,24 +41,23 @@ Verification:
 ### 1.2 Stopping a Session
 
 ```bash
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 ```
 
-Identifies processes listening on the managed ports, sends SIGTERM, waits 1 second, then sends SIGKILL if needed. Cleans up `.pids` files.
+Identifies the processes listening on the UI port (5173) and the orchestrator port (from `ADDR`), sends SIGTERM, waits 1 second, then sends SIGKILL if needed. Any PIDs left in `.pids` are stopped too and the file is removed. mlx-serve profiles are not stopped. To stop mlx-serve as well:
+
+```bash
+pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+```
 
 ### 1.3 Viewing Logs
 
 ```bash
-# Real-time (start.sh shows these automatically)
-tail -f logs/orchestrator.log
-tail -f logs/gm.log
-tail -f logs/ui.log
-
-# All LLM logs at once
-tail -f logs/gm.log logs/support.log \
-        logs/npc-a.log logs/npc-b.log logs/npc-c.log \
-        logs/embed.log
+# Real-time (Start-Omni.ps1 -Follow shows these automatically)
+tail -f logs/orchestrator.log logs/ui.log
 ```
+
+LLM inference logs live on the mlx-serve side (see the mlx-serve README). Each stage's output and its re-thinking history (`[NG 1/3] ...`) are recorded in the `session_logs` table.
 
 ---
 
@@ -134,17 +146,26 @@ sqlite3 data/omni.db \
 Freshly imported chunks have no embeddings (embedding=NULL). RAG search requires embeddings.
 
 ```bash
-# Make sure the embed server is running on port 11435
+# Make sure mlx-serve bge-m3-q8 is running on port 11455
 uv run ai-agents/embed_chunks.py \
     --db data/omni.db \
-    --embed-url http://localhost:11435 \
+    --embed-url http://127.0.0.1:11455 \
     --batch 50
 ```
+
+Every row without an embedding in `rag_chunks` and `rag_chunks_opt` is processed.
 
 Check progress:
 
 ```bash
-uv run ai-agents/embed_chunks.py --db data/omni.db --status
+sqlite3 data/omni.db \
+  "SELECT count(*) FROM rag_chunks WHERE embedding IS NULL;"
+```
+
+When you change the embedding model, the vector dimension changes (e.g. 768 → 1024), so clear the existing embeddings and rebuild them all:
+
+```bash
+uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
 ```
 
 ### 3.3 Chunk Optimization (Optional, Recommended)
@@ -158,8 +179,8 @@ uv run ai-agents/optimize_chunks.py --status
 # Run a batch (20 chunks at a time; best done during off-hours)
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
-    --model-url http://localhost:11430 \
-    --embed-url http://localhost:11435
+    --model-url http://127.0.0.1:11441 \
+    --embed-url http://127.0.0.1:11455
 
 # Retry failed chunks
 uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
@@ -218,7 +239,6 @@ Create `data/personas/{id}.yaml`. The `id` field must match the filename (withou
 ```yaml
 id: new_npc
 name: Character Name
-port: 11432         # one of 11432–11434; must not overlap existing personas
 race: Human
 classes:
   - name: Sorcerer
@@ -241,7 +261,7 @@ After creating the file, add the NPC via **INFORMATION** tab → "PARTY MEMBERS"
 
 ### 4.2 Updating a Persona
 
-Edit the YAML file directly, then restart the session (`./stop.sh && ./start.sh`).
+Edit the YAML file directly, then restart the session (`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`).
 
 Emergency in-session edits (DEV mode):
 1. Enable **DEV MODE** in the UI header
@@ -422,22 +442,34 @@ cd ui && npm run dev -- --host
 ### LLM Not Responding
 
 ```bash
-# Check individual server health
-curl http://localhost:11430/health
-curl http://localhost:11435/health
+# Check mlx-serve
+curl http://127.0.0.1:11441/health    # chat model
+curl http://127.0.0.1:11455/health    # embeddings
+pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1
 
-# Check logs
-tail -50 logs/gm.log
-tail -50 logs/embed.log
+# Start a profile that is down
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 
-# Manual restart
-llama-server \
-  --model /path/to/model.gguf \
-  --port 11430 --host 127.0.0.1 \
-  --ctx-size 4096 --n-gpu-layers 99
+# The orchestrator's startup check
+grep mlx-serve logs/orchestrator.log
 ```
 
-### RAG Search Not Working (No Embeddings)
+- Make sure `LLM_MODEL_ID` / `EMBED_MODEL_ID` match the mlx-serve profile names. mlx-vlm returns 422 when `model` is missing and reloads the resident model when a different name is sent.
+
+### An NPC Does Not Act / HP and MP Are Applied As-Is
+
+When a stage never passes validation, the reason is added to `warnings` in the `TurnResult` (the NPC sits out that turn; if Support fails, the NPCs' own `hp_delta` / `mp_cost` are used). `stage_attempts` shows how many calls each stage took.
+
+```bash
+# Show rejected outputs and their errors
+sqlite3 data/omni.db \
+  "SELECT turn, role, substr(content,1,200) FROM session_logs WHERE content LIKE '[NG %' ORDER BY id DESC LIMIT 20;"
+```
+
+The number of re-thinks is set by `STAGE_RETRY_LIMIT` in `config.env` (default 2).
+
+### RAG Search Not Working (No Embeddings / Dimension Mismatch)
 
 ```bash
 # Count chunks without embeddings
@@ -446,14 +478,18 @@ sqlite3 data/omni.db \
 
 # Generate missing embeddings
 uv run ai-agents/embed_chunks.py \
-    --embed-url http://localhost:11435
+    --embed-url http://127.0.0.1:11455
+
+# After changing the embedding model (old vectors have a different dimension), rebuild all
+uv run ai-agents/embed_chunks.py --reembed-all
 ```
 
 ### Turn Processing Timeout
 
 - UI timeout is 180 seconds (`AbortSignal.timeout(180000)` in `SessionView.tsx`)
-- Try a smaller model for `MODEL_GM`
-- Reduce `--ctx-size` to `2048`
+- Timeout per LLM request: `LLM_TIMEOUT_SEC` in `config.env` (default 300 seconds)
+- All stages run serially on one model, so a turn takes GM + each NPC + Support. Re-thinking adds to that (check `stage_attempts`)
+- To favor speed, lower `STAGE_RETRY_LIMIT`
 
 ### ComfyUI Images Not Generating
 
@@ -475,23 +511,18 @@ grep COMFY_URL config.env
 sqlite3 data/omni.db "PRAGMA wal_checkpoint(FULL);"
 
 # Delete WAL files (all services must be stopped first)
-./stop.sh
+pwsh scripts/Stop-Omni.ps1
 rm -f data/omni.db-shm data/omni.db-wal
-./start.sh
+pwsh scripts/Start-Omni.ps1
 ```
 
-### llama-server Not Found
+### Start-Omni.ps1 Exits Asking You to Start mlx-serve Profiles
 
-```bash
-# Check PATH
-which llama-server
+`/health` of `LLM_URL` or `EMBED_URL` is not answering. Start the profile with the `Start-MlxServe.ps1` command it prints, then run it again.
 
-# Set full path in config.env
-echo "LLAMA_SERVER=/usr/local/bin/llama-server" >> config.env
+### Start-Omni.ps1 Exits Saying a Previous .pids Was Found
 
-# For LM Studio's bundled binary
-echo "LLAMA_SERVER=/Applications/LM Studio.app/Contents/Resources/llama-server" >> config.env
-```
+The previous stop did not complete. Run `pwsh scripts/Stop-Omni.ps1`, then start again.
 
 ---
 
@@ -515,10 +546,6 @@ echo "LLAMA_SERVER=/Applications/LM Studio.app/Contents/Resources/llama-server" 
 |---------|------|-------------|
 | Vite UI | 5173 | Frontend development server |
 | Go Orchestrator | 8080 | REST API + WebSocket |
-| GM LLM | 11430 | GM role (Gemma-4B equivalent) |
-| Support LLM | 11431 | Validation and resource calculation |
-| NPC-A LLM | 11432 | First NPC |
-| NPC-B LLM | 11433 | Second NPC |
-| NPC-C LLM | 11434 | Third NPC |
-| Embed LLM | 11435 | Embedding vector generation |
+| mlx-serve `gemma4-31b-it-heretic-4bit-mtp` | 11441 | Chat model shared by GM, NPC and Support (managed by mlx-serve) |
+| mlx-serve `bge-m3-q8` | 11455 | Embedding vector generation (managed by mlx-serve) |
 | ComfyUI | 8188 | Image generation (Windows side) |
