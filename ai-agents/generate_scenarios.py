@@ -14,7 +14,8 @@ generate_scenarios.py — シナリオと関連素材をオフラインバッチ
 オプション:
   --count N             生成シナリオ数 (デフォルト: 1)
   --rank RANK           ランク A/B/C/D/E (デフォルト: C)
-  --model-url URL       テキスト生成 LLM URL (デフォルト: http://localhost:11430)
+  --model-url URL       テキスト生成 LLM URL (デフォルト: mlx-serve :11441)
+  --model-id ID         テキスト生成 LLM の model_id
   --comfy-url URL       ComfyUI URL (例: http://<ComfyUI-HOST>:8188)
   --comfy-model NAME    使用 checkpoint 名 (省略時は自動検出)
   --db PATH             DB ファイルパス
@@ -39,11 +40,12 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
+import mlx_client
+
 # ── 定数 ─────────────────────────────────────────────────────────────────────
 
 _PROJECT_ROOT      = Path(__file__).resolve().parent.parent
 DEFAULT_DB         = _PROJECT_ROOT / "data" / "omni.db"
-DEFAULT_LLM        = "http://localhost:11430"
 DEFAULT_IMAGES_DIR = _PROJECT_ROOT / "data" / "images"
 
 RANK_DESC = {
@@ -145,12 +147,7 @@ def http_post(url: str, payload: dict, timeout: int = 120) -> dict:
         return json.loads(res.read())
 
 
-def ping(url: str) -> bool:
-    try:
-        urllib.request.urlopen(f"{url}/health", timeout=3)
-        return True
-    except Exception:
-        return False
+ping = mlx_client.ping
 
 
 def ping_comfy(url: str) -> bool:
@@ -163,17 +160,12 @@ def ping_comfy(url: str) -> bool:
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 
-def call_llm(model_url: str, prompt: str, max_tokens: int = 2048,
+def call_llm(model_url: str, model_id: str, prompt: str, max_tokens: int = 2048,
              timeout: int = 180) -> Optional[str]:
     try:
-        result = http_post(f"{model_url}/completion", {
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": 0.85,
-            "top_p": 0.95,
-            "stop": ["\n\n\n"],
-        }, timeout=timeout)
-        return result.get("content", "").strip()
+        return mlx_client.chat(model_url, model_id, prompt,
+                               max_tokens=max_tokens, temperature=0.85, top_p=0.95,
+                               stop=["\n\n\n"], timeout=timeout)
     except Exception as e:
         print(f"  [LLM error] {e}", file=sys.stderr)
         return None
@@ -495,7 +487,7 @@ def generate_one_scenario(args, con: sqlite3.Connection,
 
     # ── LLM でシナリオ生成 ──
     prompt = SCENARIO_PROMPT.format(rank=rank, rank_desc=rank_desc)
-    raw = call_llm(args.model_url, prompt)
+    raw = call_llm(args.model_url, args.model_id, prompt)
     if raw is None:
         print("  → LLM 失敗")
         return False
@@ -683,7 +675,8 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="シナリオと素材をバッチ生成するスクリプト")
     parser.add_argument("--count",         type=int,  default=1,              help="生成シナリオ数 (デフォルト: 1)")
     parser.add_argument("--rank",          default="C",                       help="ランク A/B/C/D/E (デフォルト: C)")
-    parser.add_argument("--model-url",     default=DEFAULT_LLM,               help="LLM URL")
+    parser.add_argument("--model-url",     default=mlx_client.DEFAULT_LLM_URL,      help="LLM URL")
+    parser.add_argument("--model-id",      default=mlx_client.DEFAULT_LLM_MODEL_ID, help="LLM model_id")
     parser.add_argument("--comfy-url",     default=None,                      help="ComfyUI URL (例: http://<ComfyUI-HOST>:8188)")
     parser.add_argument("--comfy-model",   default=None,                      help="使用する checkpoint モデル名")
     parser.add_argument("--db",            type=Path, default=DEFAULT_DB,     help="DB ファイルパス")
@@ -743,7 +736,7 @@ def main() -> None:
             print("[check] ComfyUI: 未設定（--comfy-url または COMFY_URL 環境変数）")
 
     if not llm_ok:
-        print("[error] LLM に接続できません。llama-server が起動しているか確認してください。")
+        print("[error] LLM に接続できません。mlx-serve でプロファイルが起動しているか確認してください。")
         sys.exit(1)
 
     # ── 共通背景生成 ──

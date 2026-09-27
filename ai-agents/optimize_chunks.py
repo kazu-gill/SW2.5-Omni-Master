@@ -11,8 +11,10 @@ optimize_chunks.py — rag_chunks をローカル LLM で最適化するバッ�
 
 オプション:
   --limit N          1回の実行で処理する最大チャンク数 (デフォルト: 20)
-  --model-url URL    テキスト最適化LLMのURL (デフォルト: http://localhost:11430)
-  --embed-url URL    埋め込みLLMのURL (デフォルト: http://localhost:11435)
+  --model-url URL    テキスト最適化LLMのURL (デフォルト: mlx-serve :11441)
+  --model-id ID      テキスト最適化LLMの model_id
+  --embed-url URL    埋め込みLLMのURL (デフォルト: mlx-serve :11455)
+  --embed-model-id ID 埋め込みLLMの model_id
   --db PATH          DBファイルパス
   --dry-run          DBを更新せず処理内容だけ表示
   --retry-failed     failed ステータスのチャンクを再処理
@@ -26,17 +28,15 @@ import sqlite3
 import struct
 import sys
 import time
-import urllib.request
-import urllib.error
 from pathlib import Path
 from typing import Optional
+
+import mlx_client
 
 # ── 定数 ─────────────────────────────────────────────────────────────────────
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DB    = _PROJECT_ROOT / "data" / "omni.db"
-DEFAULT_LLM   = "http://localhost:11430"
-DEFAULT_EMBED = "http://localhost:11435"
 
 VALID_TAGS = {"combat", "magic", "character", "item", "world", "general", "status", "rule"}
 
@@ -62,45 +62,27 @@ OPTIMIZE_PROMPT = """\
 
 # ── HTTP ヘルパー ─────────────────────────────────────────────────────────────
 
-def http_post(url: str, payload: dict, timeout: int = 60) -> dict:
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=data,
-                                  headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as res:
-        return json.loads(res.read())
-
-
-def call_llm(model_url: str, prompt: str, timeout: int = 120) -> Optional[str]:
+def call_llm(model_url: str, model_id: str, prompt: str, timeout: int = 120) -> Optional[str]:
     """テキスト最適化LLMを呼び出してテキストを返す。"""
     try:
-        result = http_post(f"{model_url}/completion", {
-            "prompt": prompt,
-            "max_tokens": 1024,
-            "temperature": 0.1,
-            "stop": ["\n\n\n"],
-        }, timeout=timeout)
-        return result.get("content", "").strip()
+        return mlx_client.chat(model_url, model_id, prompt,
+                               max_tokens=1024, temperature=0.1,
+                               stop=["\n\n\n"], timeout=timeout)
     except Exception as e:
         print(f"  [LLM error] {e}", file=sys.stderr)
         return None
 
 
-def call_embed(embed_url: str, text: str, timeout: int = 30) -> Optional[list[float]]:
+def call_embed(embed_url: str, model_id: str, text: str, timeout: int = 30) -> Optional[list[float]]:
     """埋め込みモデルを呼び出してベクトルを返す。"""
     try:
-        result = http_post(f"{embed_url}/embedding", {"content": text}, timeout=timeout)
-        return result.get("embedding")
+        return mlx_client.embed(embed_url, model_id, text, timeout=timeout)
     except Exception as e:
         print(f"  [Embed error] {e}", file=sys.stderr)
         return None
 
 
-def ping(url: str) -> bool:
-    try:
-        urllib.request.urlopen(f"{url}/health", timeout=3)
-        return True
-    except Exception:
-        return False
+ping = mlx_client.ping
 
 
 # ── JSON パース ───────────────────────────────────────────────────────────────
@@ -193,8 +175,10 @@ def show_stats(con: sqlite3.Connection) -> None:
 def main() -> None:
     parser = argparse.ArgumentParser(description="rag_chunks をLLMで最適化するバッチ")
     parser.add_argument("--limit",        type=int,  default=20,          help="処理件数上限 (デフォルト: 20)")
-    parser.add_argument("--model-url",    default=DEFAULT_LLM,            help="テキスト最適化LLM URL")
-    parser.add_argument("--embed-url",    default=DEFAULT_EMBED,          help="埋め込みLLM URL")
+    parser.add_argument("--model-url",    default=mlx_client.DEFAULT_LLM_URL,        help="テキスト最適化LLM URL")
+    parser.add_argument("--model-id",     default=mlx_client.DEFAULT_LLM_MODEL_ID,   help="テキスト最適化LLM model_id")
+    parser.add_argument("--embed-url",    default=mlx_client.DEFAULT_EMBED_URL,      help="埋め込みLLM URL")
+    parser.add_argument("--embed-model-id", default=mlx_client.DEFAULT_EMBED_MODEL_ID, help="埋め込みLLM model_id")
     parser.add_argument("--db",           type=Path, default=DEFAULT_DB,  help="DB ファイルパス")
     parser.add_argument("--dry-run",      action="store_true",            help="DBを更新しない")
     parser.add_argument("--retry-failed", action="store_true",            help="failed チャンクを再処理")
@@ -220,7 +204,7 @@ def main() -> None:
     print(f"[check] LLM   ({args.model_url}): {'✓ 接続OK' if llm_ok else '✗ 未接続'}")
     print(f"[check] Embed ({args.embed_url}): {'✓ 接続OK' if embed_ok else '✗ 未接続（埋め込みをスキップ）'}")
     if not llm_ok:
-        print("[error] LLM に接続できません。llama-server が起動しているか確認してください。")
+        print("[error] LLM に接続できません。mlx-serve でプロファイルが起動しているか確認してください。")
         sys.exit(1)
 
     # ── 処理対象取得 ──
@@ -244,7 +228,7 @@ def main() -> None:
 
         # ── LLM最適化 ──
         prompt = OPTIMIZE_PROMPT.format(chunk_text=orig_text)
-        raw = call_llm(args.model_url, prompt)
+        raw = call_llm(args.model_url, args.model_id, prompt)
         if raw is None:
             print(f"          → LLM失敗")
             if not args.dry_run:
@@ -268,14 +252,14 @@ def main() -> None:
         # ── 再埋め込み ──
         embedding = None
         if embed_ok:
-            embedding = call_embed(args.embed_url, opt_text)
+            embedding = call_embed(args.embed_url, args.embed_model_id, opt_text)
             if embedding is None:
                 print(f"          → 埋め込み失敗（テキストのみ保存）")
 
         # ── DB 保存 ──
         if not args.dry_run:
             upsert_opt(con, chunk_id, opt_text, tag, summary, embedding,
-                       model=args.model_url)
+                       model=args.model_id)
             con.commit()
 
         ok_count += 1
