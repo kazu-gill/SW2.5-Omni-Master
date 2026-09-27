@@ -229,6 +229,17 @@ uv run ai-agents/build_rulebook.py [--md PATH] [--db PATH] [--source rulebook1] 
 - 既定は確認のみ (`logs/rulebook-preview.jsonl` を書き出す)。`--apply` で DB をバックアップしてからルールブック行を置き換える (ハウスルール・訂正は残す)
 - 実装は `ai-agents/rulebook_chunker.py`
 
+### ルールブック原本の OCR 誤字修正
+
+```bash
+uv run ai-agents/fix_rulebook_ocr.py            # 何が直るかを表示するだけ
+uv run ai-agents/fix_rulebook_ocr.py --apply    # 原本をバックアップしてから書き換える
+```
+
+- 原本 Markdown (`data/rulebook/`) の OCR 誤字を置換表で直す。原本を取り直したら、インポートの前に実行する
+- 件数が想定と違えば何も書き込まずに止まる。適用済みなら何もしない
+- 誤字の候補探しは `uv run ai-agents/find_ocr_suspects.py`、判断の記録は [docs/ocr-suspects-20260927.md](docs/ocr-suspects-20260927.md)
+
 ### ハウスルール・訂正テキストの追加
 
 ```bash
