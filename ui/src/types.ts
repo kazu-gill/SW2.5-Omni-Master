@@ -68,6 +68,11 @@ export interface RuleEntry {
   text: string
   overrides_id: number | null
   enabled: boolean
+  /** 部 > 章 > 見出し (ルールブックから取り込んだもの) */
+  section?: string
+  /** 本のページ */
+  page_from?: number
+  page_to?: number
 }
 
 export interface NPCSkill {

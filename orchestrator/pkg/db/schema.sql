@@ -49,7 +49,11 @@ CREATE TABLE IF NOT EXISTS rag_chunks (
     enabled      INTEGER NOT NULL DEFAULT 1, -- 0=無効（RAG検索対象外）
     overrides_id INTEGER REFERENCES rag_chunks(id), -- 訂正元チャンクID
     embedding    BLOB,                       -- NULL until embedded
-    opt_status   TEXT DEFAULT NULL           -- NULL:未処理 / 'done' / 'failed' / 'skip'
+    opt_status   TEXT DEFAULT NULL,          -- NULL:未処理 / 'done' / 'failed' / 'skip'
+    source       TEXT    NOT NULL DEFAULT '', -- 取り込み元 (例: 'rulebook1')。UI で追加したものは空
+    section      TEXT    NOT NULL DEFAULT '', -- 部 > 章 > 見出し。埋め込み時は本文の前に付ける
+    page_from    INTEGER,                    -- 本のページ (範囲の先頭)
+    page_to      INTEGER                     -- 本のページ (範囲の末尾)
 );
 
 -- LLM最適化済みチャンク（バッチメンテナンスで生成）

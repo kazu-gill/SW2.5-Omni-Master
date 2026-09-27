@@ -72,14 +72,46 @@ func TestBuildContext(t *testing.T) {
 	engine, _ := setupTest(t)
 	chunks := []db.RAGChunk{
 		{SourceType: "houserule", Text: "ハウスルールA"},
-		{SourceType: "rulebook", Text: "ルールB"},
+		{SourceType: "correction", Text: "訂正C"},
+		{SourceType: "rulebook", Section: "第二部 ルール > 戦闘のルール", PageFrom: 128, PageTo: 129, Text: "ルールB"},
 	}
-	ctx := engine.BuildContext(chunks)
-	if ctx == "" {
-		t.Fatal("BuildContext returned empty string")
+	got := engine.BuildContext(chunks)
+	want := "【参照ルール】\n" +
+		"[ハウスルール] ハウスルールA\n" +
+		"[訂正] 訂正C\n" +
+		"[第二部 ルール > 戦闘のルール p.128-129] ルールB\n"
+	if got != want {
+		t.Errorf("BuildContext =\n%s\nwant\n%s", got, want)
 	}
-	if ctx[:len("【参照ルール】")] != "【参照ルール】" {
-		t.Errorf("BuildContext missing header: %q", ctx)
+}
+
+func TestEmbedInputPrefixesSection(t *testing.T) {
+	if got := EmbedInput("第二部 > 戦闘", "本文"); got != "第二部 > 戦闘\n本文" {
+		t.Errorf("got %q", got)
+	}
+	if got := EmbedInput("", "本文"); got != "本文" {
+		t.Errorf("got %q", got)
+	}
+}
+
+func TestReembedUpdatesEmbeddingAfterEdit(t *testing.T) {
+	engine, database := setupTest(t)
+	ctx := context.Background()
+
+	id, err := engine.IndexChunk(ctx, "houserule", 20, "ハウスルール")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Edit the text so it now embeds to [1,0,0] (the mock's vector for "ルール本文テスト")
+	if err := db.UpdateRAGChunk(database, id, "ルール本文テスト", "", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Reembed(ctx, id); err != nil {
+		t.Fatalf("Reembed: %v", err)
+	}
+	results, err := engine.Search(ctx, "ルール本文テスト", 1)
+	if err != nil || len(results) != 1 || results[0].ID != id {
+		t.Fatalf("results=%+v err=%v", results, err)
 	}
 }
 

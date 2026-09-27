@@ -17,6 +17,17 @@ type RAGChunk struct {
 	Enabled     bool
 	OverridesID *int64
 	Embedding   []float32
+	Source      string // 取り込み元 (例: "rulebook1")。UI で追加したものは空
+	Section     string // 部 > 章 > 見出し
+	PageFrom    int    // 本のページ。0 は不明
+	PageTo      int
+}
+
+func nullablePage(p int) any {
+	if p == 0 {
+		return nil
+	}
+	return p
 }
 
 func InsertRAGChunk(d *sql.DB, chunk RAGChunk) (int64, error) {
@@ -29,9 +40,11 @@ func InsertRAGChunk(d *sql.DB, chunk RAGChunk) (int64, error) {
 		enabled = 0
 	}
 	res, err := d.Exec(
-		`INSERT INTO rag_chunks (source_type, priority, tag, text, enabled, overrides_id, embedding)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		`INSERT INTO rag_chunks (source_type, priority, tag, text, enabled, overrides_id, embedding,
+		                         source, section, page_from, page_to)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		chunk.SourceType, chunk.Priority, chunk.Tag, chunk.Text, enabled, chunk.OverridesID, embBlob,
+		chunk.Source, chunk.Section, nullablePage(chunk.PageFrom), nullablePage(chunk.PageTo),
 	)
 	if err != nil {
 		return 0, fmt.Errorf("InsertRAGChunk: %w", err)
@@ -40,7 +53,8 @@ func InsertRAGChunk(d *sql.DB, chunk RAGChunk) (int64, error) {
 }
 
 func ListRAGChunks(d *sql.DB, sourceType string) ([]RAGChunk, error) {
-	q := `SELECT id, source_type, priority, tag, text, enabled, overrides_id
+	q := `SELECT id, source_type, priority, tag, text, enabled, overrides_id,
+	             source, section, COALESCE(page_from, 0), COALESCE(page_to, 0)
 	      FROM rag_chunks`
 	args := []any{}
 	if sourceType != "" {
@@ -60,7 +74,8 @@ func ListRAGChunks(d *sql.DB, sourceType string) ([]RAGChunk, error) {
 		var c RAGChunk
 		var enabled int
 		var overridesID sql.NullInt64
-		if err := rows.Scan(&c.ID, &c.SourceType, &c.Priority, &c.Tag, &c.Text, &enabled, &overridesID); err != nil {
+		if err := rows.Scan(&c.ID, &c.SourceType, &c.Priority, &c.Tag, &c.Text, &enabled, &overridesID,
+			&c.Source, &c.Section, &c.PageFrom, &c.PageTo); err != nil {
 			return nil, err
 		}
 		c.Enabled = enabled != 0
@@ -71,6 +86,27 @@ func ListRAGChunks(d *sql.DB, sourceType string) ([]RAGChunk, error) {
 		out = append(out, c)
 	}
 	return out, rows.Err()
+}
+
+// GetRAGChunk returns one chunk (without its embedding).
+func GetRAGChunk(d *sql.DB, id int64) (RAGChunk, error) {
+	var c RAGChunk
+	var enabled int
+	var overridesID sql.NullInt64
+	err := d.QueryRow(`SELECT id, source_type, priority, tag, text, enabled, overrides_id,
+	                          source, section, COALESCE(page_from, 0), COALESCE(page_to, 0)
+	                   FROM rag_chunks WHERE id = ?`, id).
+		Scan(&c.ID, &c.SourceType, &c.Priority, &c.Tag, &c.Text, &enabled, &overridesID,
+			&c.Source, &c.Section, &c.PageFrom, &c.PageTo)
+	if err != nil {
+		return RAGChunk{}, fmt.Errorf("GetRAGChunk %d: %w", id, err)
+	}
+	c.Enabled = enabled != 0
+	if overridesID.Valid {
+		v := overridesID.Int64
+		c.OverridesID = &v
+	}
+	return c, nil
 }
 
 func UpdateRAGChunk(d *sql.DB, id int64, text string, tag string, enabled bool) error {
@@ -162,8 +198,9 @@ func UpdateEmbedding(d *sql.DB, chunkID int64, embedding []float32) error {
 }
 
 // SearchRAGChunks finds the topK most similar chunks to queryVec using cosine
-// similarity. Only enabled chunks are considered. Priority (20 > 10 > 0) is
-// used as a tiebreaker at equal similarity.
+// similarity. Only enabled chunks are considered, and a chunk that an enabled
+// correction/houserule overrides (overrides_id) is left out so the fix wins.
+// Priority (20 > 10 > 0) is used as a tiebreaker at equal similarity.
 // When a rag_chunks_opt record exists for a chunk, its text and embedding are
 // used instead of the originals.
 func SearchRAGChunks(d *sql.DB, queryVec []float32, topK int) ([]RAGChunk, error) {
@@ -171,11 +208,14 @@ func SearchRAGChunks(d *sql.DB, queryVec []float32, topK int) ([]RAGChunk, error
 		SELECT r.id, r.source_type, r.priority,
 		       COALESCE(o.tag, r.tag)           AS tag,
 		       COALESCE(o.text, r.text)          AS text,
-		       COALESCE(o.embedding, r.embedding) AS embedding
+		       COALESCE(o.embedding, r.embedding) AS embedding,
+		       r.source, r.section, COALESCE(r.page_from, 0), COALESCE(r.page_to, 0)
 		FROM rag_chunks r
 		LEFT JOIN rag_chunks_opt o ON o.chunk_id = r.id
 		WHERE r.enabled = 1
-		  AND COALESCE(o.embedding, r.embedding) IS NOT NULL`)
+		  AND COALESCE(o.embedding, r.embedding) IS NOT NULL
+		  AND r.id NOT IN (SELECT overrides_id FROM rag_chunks
+		                   WHERE enabled = 1 AND overrides_id IS NOT NULL)`)
 	if err != nil {
 		return nil, err
 	}
@@ -190,7 +230,8 @@ func SearchRAGChunks(d *sql.DB, queryVec []float32, topK int) ([]RAGChunk, error
 	for rows.Next() {
 		var c RAGChunk
 		var blob []byte
-		if err := rows.Scan(&c.ID, &c.SourceType, &c.Priority, &c.Tag, &c.Text, &blob); err != nil {
+		if err := rows.Scan(&c.ID, &c.SourceType, &c.Priority, &c.Tag, &c.Text, &blob,
+			&c.Source, &c.Section, &c.PageFrom, &c.PageTo); err != nil {
 			return nil, err
 		}
 		c.Enabled = true

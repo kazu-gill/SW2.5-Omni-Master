@@ -54,7 +54,7 @@ func main() {
 	comfy := game.NewComfyUIClient(cfg.ComfyURL) // nil if COMFY_URL is empty
 	engine := game.NewEngine(database, chat, ragEngine, cfg.StageRetryLimit)
 
-	handler := api.New(database, engine, comfy, cfg.PersonasDir)
+	handler := api.New(database, engine, ragEngine, comfy, cfg.PersonasDir)
 	mux := http.NewServeMux()
 	handler.Routes(mux)
 

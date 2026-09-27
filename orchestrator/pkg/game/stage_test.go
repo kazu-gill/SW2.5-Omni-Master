@@ -2,12 +2,18 @@ package game
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/llm"
+	"github.com/kf/sw25-omni-master/pkg/rag"
 )
 
 // scriptedLLM returns replies in order and records every request.
@@ -210,5 +216,52 @@ func TestProcessTurnSupportFallsBackAfterRetries(t *testing.T) {
 	}
 	if res.StageAttempts["support"] != 3 || len(res.Warnings) != 1 {
 		t.Errorf("attempts=%v warnings=%v", res.StageAttempts, res.Warnings)
+	}
+}
+
+// ── ルールブックの参照 ─────────────────────────────────────────────────────────
+
+func newRAGEngine(t *testing.T, database *sql.DB) *rag.Engine {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": []float32{1, 0, 0}}}})
+	}))
+	t.Cleanup(srv.Close)
+	return rag.New(database, llm.New(srv.URL, "test-embed", 5*time.Second))
+}
+
+func TestProcessTurnGivesRulesToGMAndSupport(t *testing.T) {
+	m := &scriptedLLM{replies: []llm.Result{
+		{Text: "GMの描写。", FinishReason: "stop"},
+		{Text: "name: A\naction: エネルギー・ボルト\ndialogue: くらえ\nmp_cost: 5\nhp_delta: 0", FinishReason: "stop"},
+		{Text: `[{"npc_name":"A","hp_delta":0,"mp_cost":5}]`, FinishReason: "stop"},
+	}}
+	database, err := db.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { database.Close() })
+	if _, err := db.InsertRAGChunk(database, db.RAGChunk{
+		SourceType: "rulebook", Section: "第三部 データ > 魔法データ > 真語魔法データ", PageFrom: 248, PageTo: 249,
+		Text: "【エネルギー・ボルト】消費MP5", Enabled: true, Embedding: []float32{1, 0, 0},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	e := NewEngine(database, m, newRAGEngine(t, database), 2)
+	session, _ := db.CreateSession(database, "q")
+	_ = db.UpsertNPCSheet(database, db.NPCSheet{SessionID: session.ID, Name: "A", HP: 20, MP: 20})
+
+	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: session.ID, Turn: 1, Text: "魔法で攻撃"}); err != nil {
+		t.Fatalf("ProcessTurn: %v", err)
+	}
+	gmSystem := m.calls[0].msgs[0].Content
+	supportSystem := m.calls[2].msgs[0].Content
+	for name, prompt := range map[string]string{"GM": gmSystem, "Support": supportSystem} {
+		if !strings.Contains(prompt, "[第三部 データ > 魔法データ > 真語魔法データ p.248-249] 【エネルギー・ボルト】消費MP5") {
+			t.Errorf("%s prompt lacks the rule: %q", name, prompt)
+		}
+		if strings.Count(prompt, "【参照ルール】") != 1 {
+			t.Errorf("%s prompt should have exactly one rules header: %q", name, prompt)
+		}
 	}
 }

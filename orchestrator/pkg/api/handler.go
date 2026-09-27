@@ -14,9 +14,10 @@ import (
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/game"
+	"github.com/kf/sw25-omni-master/pkg/rag"
+	"gopkg.in/yaml.v3"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
-	"gopkg.in/yaml.v3"
 )
 
 // wsClient wraps a WebSocket connection with a serialized write channel.
@@ -29,6 +30,7 @@ type wsClient struct {
 type Handler struct {
 	database    *sql.DB
 	engine      *game.Engine
+	rag         *rag.Engine // embeds rules added or edited from the UI
 	comfy       *game.ComfyUIClient
 	personasDir string
 
@@ -36,10 +38,11 @@ type Handler struct {
 	clients map[*wsClient]struct{}
 }
 
-func New(database *sql.DB, engine *game.Engine, comfy *game.ComfyUIClient, personasDir string) *Handler {
+func New(database *sql.DB, engine *game.Engine, ragEngine *rag.Engine, comfy *game.ComfyUIClient, personasDir string) *Handler {
 	return &Handler{
 		database:    database,
 		engine:      engine,
+		rag:         ragEngine,
 		comfy:       comfy,
 		personasDir: personasDir,
 		clients:     make(map[*wsClient]struct{}),
@@ -638,13 +641,32 @@ func (h *Handler) handleDeactivatePC(w http.ResponseWriter, r *http.Request) {
 
 // ruleJSON is the JSON shape returned to and accepted from the UI.
 type ruleJSON struct {
-	ID          int64   `json:"id"`
-	SourceType  string  `json:"source_type"`
-	Priority    int     `json:"priority"`
-	Tag         string  `json:"tag"`
-	Text        string  `json:"text"`
-	Enabled     bool    `json:"enabled"`
-	OverridesID *int64  `json:"overrides_id"`
+	ID          int64  `json:"id"`
+	SourceType  string `json:"source_type"`
+	Priority    int    `json:"priority"`
+	Tag         string `json:"tag"`
+	Text        string `json:"text"`
+	Enabled     bool   `json:"enabled"`
+	OverridesID *int64 `json:"overrides_id"`
+	Section     string `json:"section,omitempty"`
+	PageFrom    int    `json:"page_from,omitempty"`
+	PageTo      int    `json:"page_to,omitempty"`
+	// Embedded reports whether a created rule got its embedding (RAG can find it).
+	Embedded *bool `json:"embedded,omitempty"`
+}
+
+// embedRule (re)generates a rule's embedding. A failure is logged and
+// reported, not fatal: the rule is saved and can be re-embedded later with
+// ai-agents/embed_chunks.py.
+func (h *Handler) embedRule(ctx context.Context, id int64) bool {
+	if h.rag == nil {
+		return false
+	}
+	if err := h.rag.Reembed(ctx, id); err != nil {
+		log.Printf("warn: rule %d saved without embedding: %v", id, err)
+		return false
+	}
+	return true
 }
 
 func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
@@ -659,6 +681,7 @@ func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
 		out = append(out, ruleJSON{
 			ID: c.ID, SourceType: c.SourceType, Priority: c.Priority,
 			Tag: c.Tag, Text: c.Text, Enabled: c.Enabled, OverridesID: c.OverridesID,
+			Section: c.Section, PageFrom: c.PageFrom, PageTo: c.PageTo,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -695,11 +718,13 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	embedded := h.embedRule(r.Context(), id)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusCreated)
 	json.NewEncoder(w).Encode(ruleJSON{
 		ID: id, SourceType: req.SourceType, Priority: priority,
 		Tag: req.Tag, Text: req.Text, Enabled: true, OverridesID: req.OverridesID,
+		Embedded: &embedded,
 	})
 }
 
@@ -722,6 +747,7 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	h.embedRule(r.Context(), id) // the text may have changed
 	w.WriteHeader(http.StatusNoContent)
 }
 

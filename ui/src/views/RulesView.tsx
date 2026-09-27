@@ -183,7 +183,14 @@ export default function RulesView() {
                   <td><span className={`source-badge ${r.source_type}`}>{SOURCE_LABEL[r.source_type]}</span></td>
                   <td><span className={`priority-badge p-${r.priority}`}>{r.priority}</span></td>
                   <td className="rules-tag-cell">{r.tag || <span style={{ color: 'var(--text-dim)' }}>—</span>}</td>
-                  <td className="rules-text-cell" title={r.text}>{r.text}</td>
+                  <td className="rules-text-cell" title={r.section ? `${r.section}\n${r.text}` : r.text}>
+                    {r.section && (
+                      <span style={{ display: 'block', fontSize: '0.8em', color: 'var(--text-dim)' }}>
+                        {r.section}{r.page_from ? ` p.${r.page_from}${r.page_to && r.page_to !== r.page_from ? `-${r.page_to}` : ''}` : ''}
+                      </span>
+                    )}
+                    {r.text}
+                  </td>
                   <td>
                     {r.overrides_id
                       ? <span className="overrides-chip">→ ID:{r.overrides_id}</span>

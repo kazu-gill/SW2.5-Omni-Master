@@ -112,3 +112,93 @@ func TestAppendLog(t *testing.T) {
 		t.Fatalf("AppendLog: %v", err)
 	}
 }
+
+func TestRAGSearchExcludesOverriddenChunk(t *testing.T) {
+	d := openTestDB(t)
+
+	origID, err := InsertRAGChunk(d, RAGChunk{SourceType: "rulebook", Text: "誤った記述", Enabled: true, Embedding: []float32{1, 0, 0}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := InsertRAGChunk(d, RAGChunk{SourceType: "correction", Priority: 10, Text: "正しい記述", Enabled: true,
+		OverridesID: &origID, Embedding: []float32{0.9, 0.1, 0}}); err != nil {
+		t.Fatal(err)
+	}
+
+	results, err := SearchRAGChunks(d, []float32{1, 0, 0}, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range results {
+		if r.ID == origID {
+			t.Fatalf("overridden chunk %d should not be returned: %+v", origID, results)
+		}
+	}
+	if len(results) != 1 || results[0].Text != "正しい記述" {
+		t.Errorf("results = %+v", results)
+	}
+}
+
+func TestRAGSearchKeepsChunkWhenCorrectionDisabled(t *testing.T) {
+	d := openTestDB(t)
+	origID, _ := InsertRAGChunk(d, RAGChunk{SourceType: "rulebook", Text: "元の記述", Enabled: true, Embedding: []float32{1, 0, 0}})
+	_, _ = InsertRAGChunk(d, RAGChunk{SourceType: "correction", Text: "無効な訂正", Enabled: false,
+		OverridesID: &origID, Embedding: []float32{1, 0, 0}})
+
+	results, _ := SearchRAGChunks(d, []float32{1, 0, 0}, 5)
+	if len(results) != 1 || results[0].ID != origID {
+		t.Errorf("a disabled correction must not hide the original: %+v", results)
+	}
+}
+
+func TestRAGChunkSectionAndPagesRoundTrip(t *testing.T) {
+	d := openTestDB(t)
+	id, err := InsertRAGChunk(d, RAGChunk{
+		SourceType: "rulebook", Source: "rulebook1", Section: "第二部 ルール > 戦闘のルール > 戦闘の流れ",
+		PageFrom: 128, PageTo: 129, Tag: "combat", Text: "戦闘は先制判定から始まります。", Enabled: true,
+		Embedding: []float32{1, 0, 0},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found, _ := SearchRAGChunks(d, []float32{1, 0, 0}, 1)
+	listed, _ := ListRAGChunks(d, "rulebook")
+	for name, got := range map[string][]RAGChunk{"search": found, "list": listed} {
+		if len(got) != 1 {
+			t.Fatalf("%s: got %d chunks", name, len(got))
+		}
+		c := got[0]
+		if c.ID != id || c.Source != "rulebook1" || c.Section != "第二部 ルール > 戦闘のルール > 戦闘の流れ" ||
+			c.PageFrom != 128 || c.PageTo != 129 {
+			t.Errorf("%s: %+v", name, c)
+		}
+	}
+}
+
+func TestOpenMigratesOldRAGTable(t *testing.T) {
+	path := t.TempDir() + "/old.db"
+	old, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`CREATE TABLE rag_chunks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT, source_type TEXT NOT NULL, priority INTEGER NOT NULL,
+		text TEXT NOT NULL, embedding BLOB)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := old.Exec(`INSERT INTO rag_chunks (source_type, priority, text) VALUES ('rulebook', 0, '旧データ')`); err != nil {
+		t.Fatal(err)
+	}
+	old.Close()
+
+	d, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open old DB: %v", err)
+	}
+	defer d.Close()
+	chunks, err := ListRAGChunks(d, "")
+	if err != nil || len(chunks) != 1 || chunks[0].Text != "旧データ" || chunks[0].Section != "" {
+		t.Fatalf("chunks=%+v err=%v", chunks, err)
+	}
+}

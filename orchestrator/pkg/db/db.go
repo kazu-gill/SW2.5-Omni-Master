@@ -44,6 +44,10 @@ func migrateSchema(d *sql.DB) error {
 		`ALTER TABLE rag_chunks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1`,
 		`ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)`,
 		`ALTER TABLE rag_chunks ADD COLUMN opt_status TEXT DEFAULT NULL`,
+		`ALTER TABLE rag_chunks ADD COLUMN source TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_chunks ADD COLUMN section TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE rag_chunks ADD COLUMN page_from INTEGER`,
+		`ALTER TABLE rag_chunks ADD COLUMN page_to INTEGER`,
 	}
 	for _, stmt := range migrations {
 		if _, err := d.Exec(stmt); err != nil {

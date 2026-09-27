@@ -50,14 +50,7 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput) (*TurnResul
 	}
 
 	// 2. GM narration
-	var ragCtx string
-	if e.rag != nil {
-		// RAG failure is non-fatal; continue without context
-		if ragChunks, err := e.rag.Search(ctx, input.Text, 5); err == nil {
-			ragCtx = e.rag.BuildContext(ragChunks)
-		}
-	}
-	gmNarration, err := e.gmNarrate(ctx, tr, input, ragCtx)
+	gmNarration, err := e.gmNarrate(ctx, tr, input, e.rulesFor(ctx, input.Text, gmRuleCount))
 	if err != nil {
 		return nil, fmt.Errorf("gm narration: %w", err)
 	}
@@ -92,6 +85,26 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput) (*TurnResul
 	return tr, nil
 }
 
+// Number of rulebook chunks given to each stage.
+const (
+	gmRuleCount      = 5
+	supportRuleCount = 3
+)
+
+// rulesFor searches the rulebook for query and returns the formatted context
+// ("【参照ルール】…"), or "" when there is no RAG engine or the search fails —
+// a missing rulebook must not stop the game.
+func (e *Engine) rulesFor(ctx context.Context, query string, topK int) string {
+	if e.rag == nil || strings.TrimSpace(query) == "" {
+		return ""
+	}
+	chunks, err := e.rag.Search(ctx, query, topK)
+	if err != nil {
+		return ""
+	}
+	return e.rag.BuildContext(chunks)
+}
+
 func (e *Engine) saveCheckpoint(ctx context.Context, sessionID int64, turn int) error {
 	sheets, _ := db.GetNPCSheets(e.db, sessionID)
 	snap, _ := json.Marshal(map[string]any{
@@ -109,7 +122,7 @@ func (e *Engine) gmNarrate(ctx context.Context, tr *TurnResult, input PlayerInpu
 - 質問や直訴の場合: その内容に直接答える（NPCの紹介、ルール説明、状況確認など）
 - 必ず何かしら内容のある返答を返すこと。空の返答は禁止。`
 	if ragCtx != "" {
-		systemPrompt += "\n\n【参照ルール】\n" + ragCtx
+		systemPrompt += "\n\n" + ragCtx
 	}
 	msgs := []llm.Message{
 		{Role: "system", Content: systemPrompt},
@@ -202,12 +215,21 @@ func (e *Engine) calculateResources(ctx context.Context, tr *TurnResult, actions
 	}
 
 	actionsJSON, _ := json.Marshal(actions)
-	msgs := []llm.Message{
-		{Role: "system", Content: `あなたはTRPGの数値計算担当です。
+	systemPrompt := `あなたはTRPGの数値計算担当です。
 NPC行動リストを受け取り、各NPCのHP変化とMP消費を確定してください。
 必ずJSON配列のみを返してください。説明文・コードブロック・改行以外の余分な文字は一切不要です。
 形式（厳守）: [{"npc_name":"名前","hp_delta":0,"mp_cost":0}]
-行動に攻撃がなければhp_deltaは0、魔法でなければmp_costは0。`},
+行動に攻撃がなければhp_deltaは0、魔法でなければmp_costは0。`
+	// 行動 (魔法名・特技名など) に関係するルールを引き、消費MPなどの確定に使わせる
+	var query strings.Builder
+	for _, a := range actions {
+		fmt.Fprintf(&query, "%s %s\n", a.Action, a.Dice)
+	}
+	if rules := e.rulesFor(ctx, query.String(), supportRuleCount); rules != "" {
+		systemPrompt += "\n魔法の消費MPなど、参照ルールに記載がある値はそれに従ってください。\n\n" + rules
+	}
+	msgs := []llm.Message{
+		{Role: "system", Content: systemPrompt},
 		{Role: "user", Content: string(actionsJSON)},
 	}
 
