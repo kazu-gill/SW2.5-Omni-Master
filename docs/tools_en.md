@@ -13,10 +13,11 @@ The LLMs (chat and embeddings) are served by mlx-serve (`/Users/kf/AI/MLX`), a s
 1. [setup.sh — Initial Setup and Reset](#1-setupsh)
 2. [Start-Omni.ps1 — Start Services](#2-start-omnips1)
 3. [Stop-Omni.ps1 — Stop Services](#3-stop-omnips1)
-4. [ocr_rulebook.py — Rulebook Import](#4-ocr_rulebookpy)
-5. [embed_chunks.py — Embedding Vector Generation](#5-embed_chunkspy)
-6. [optimize_chunks.py — Chunk Optimization](#6-optimize_chunkspy)
-7. [generate_scenarios.py — Scenario Batch Generation](#7-generate_scenariospy)
+4. [build_rulebook.py — Rulebook (Re)build](#4-build_rulebookpy)
+5. [ocr_rulebook.py — House Rule / Correction Text Import](#5-ocr_rulebookpy)
+6. [embed_chunks.py — Embedding Vector Generation](#6-embed_chunkspy)
+7. [optimize_chunks.py — Chunk Optimization (Optional, Legacy)](#7-optimize_chunkspy)
+8. [generate_scenarios.py — Scenario Batch Generation](#8-generate_scenariospy)
 
 ---
 
@@ -67,6 +68,8 @@ ALTER TABLE rag_chunks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id);
 ```
 
+The `source` / `section` / `page_from` / `page_to` columns of `rag_chunks` are added automatically when the orchestrator starts (`db.Open`) and when `build_rulebook.py` / `embed_chunks.py` run.
+
 ### Configuration
 
 Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
@@ -82,7 +85,7 @@ Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
 
 # After a full reset, re-import the rulebook
 ./setup.sh --full
-uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md --db data/omni.db
+uv run ai-agents/build_rulebook.py --apply
 uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
 
@@ -191,9 +194,81 @@ pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 
 ---
 
-## 4. ocr_rulebook.py
+## 4. build_rulebook.py
 
-Imports rulebook text (PDF / Markdown / plain text) into the `rag_chunks` table.
+Rebuilds the rulebook rows of `rag_chunks` from the OCR'd rulebook Markdown. This is the way to import the rulebook. The chunking itself lives in `ai-agents/rulebook_chunker.py`.
+
+### Synopsis
+
+```
+uv run ai-agents/build_rulebook.py [options]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | Rulebook Markdown |
+| `--db` | `data/omni.db` | Database file path |
+| `--source` | `rulebook1` | Name stored in `rag_chunks.source` |
+| `--skip-pages` | `1-4,242-245` | PDF pages to leave out (cover / table of contents, and colophon / cover / blank sheet) |
+| `--preview` | `logs/rulebook-preview.jsonl` | Where to write the preview JSONL |
+| `--apply` | — | Replace the rulebook rows in the DB. Without it, preview only |
+
+### Preview (default)
+
+Builds the chunks, prints the count, character lengths (min / median / max) and the count per tag, and writes every chunk to the `--preview` JSONL. The DB is not touched.
+
+### --apply
+
+1. Backs up the DB to `data/backup/omni.bak-<timestamp>.db` (via SQLite's backup API, consistent even in WAL mode)
+2. Deletes `source_type='rulebook'` rows whose `source` is the `--source` value or empty (and their `rag_chunks_opt` rows)
+3. Inserts the new chunks (`embedding` is NULL)
+4. Keeps house rule and correction rows. If a correction or house rule points at a row to be deleted via `overrides_id`, it exits without changing anything (re-point it in the UI and run again)
+
+Then run `embed_chunks.py` to create the embeddings.
+
+### How Chunks Are Built
+
+- `## ページ N` marks a PDF page. One PDF page holds a two-page spread of the book; its book pages are `2N-4` and `2N-3`
+- The table of contents (PDF pages 3–4) is read to map book pages to part / chapter / item
+- Text is split at headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters are split at 「。」; tables are split by rows every 450 characters with the header row repeated)
+- Ruby readings in the form 「漢字（かな）」 are removed, and full-width alphanumerics become half-width
+- Left out: page-number-only lines, table-of-contents leader lines, illustration credits, ©GROUP SNE lines, checkbox rows, page layout elements (sidebars, navigation, footers, ability charts, etc.), blank form tables (half or more of the body rows empty or holding only the first-column label), the sample characters' filled sheets (their explanatory prose is kept), and the index / designer's notes / staff list chapters
+- Runs of short headed entries (glossary style) are merged into one chunk with `【見出し】` labels. A short trailing piece is attached to the previous chunk and a short intro to the next. Identical text is deduplicated
+- Each chunk gets:
+  - `section`: part > chapter > item > heading path
+  - `page_from` / `page_to`: book pages
+  - `tag`: `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario` (`general` for text the table of contents does not cover)
+- The sample scenario 「蛮族を駆逐せよ」 is imported with tag `scenario` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions. It can be enabled from the RULES screen in the UI
+
+### Examples
+
+```bash
+# Preview only
+uv run ai-agents/build_rulebook.py
+
+# Look at the preview
+head -3 logs/rulebook-preview.jsonl
+
+# Apply to the DB and embed
+uv run ai-agents/build_rulebook.py --apply
+uv run ai-agents/embed_chunks.py
+```
+
+### Tests
+
+```bash
+cd ai-agents && uv run pytest
+```
+
+Unit tests for the chunker live in `ai-agents/tests/` (pytest is a dev dependency).
+
+---
+
+## 5. ocr_rulebook.py
+
+Imports short house-rule or correction text files (PDF / Markdown / plain text) into the `rag_chunks` table.
+
+> Do not use it for the rulebook itself. It cuts text mechanically every 500 characters, so page-number fragments, the table of contents and blank sheets end up in the chunks and ruby readings remain. Import the rulebook with [build_rulebook.py](#4-build_rulebookpy).
 
 ### Synopsis
 
@@ -204,12 +279,12 @@ uv run ai-agents/ocr_rulebook.py <file> [options]
 | Option | Default | Description |
 |--------|---------|-------------|
 | `<file>` | (required) | File to import (.pdf / .md / .txt) |
-| `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule` |
+| `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule` (normally pass `correction` or `houserule`) |
 | `--db` | `data/omni.db` | Database file path |
 
 ### Source Types and Priority
 
-Higher-priority chunks are preferred during RAG retrieval.
+At equal similarity, higher-priority chunks are preferred during RAG retrieval.
 
 | Source Type | Priority | Use Case |
 |-------------|----------|----------|
@@ -223,19 +298,9 @@ Higher-priority chunks are preferred during RAG retrieval.
 
 Text is extracted using `pdfplumber`. Works for text-embedded PDFs; scanned image PDFs are not supported.
 
-```bash
-uv run ai-agents/ocr_rulebook.py data/rulebook/rulebook.pdf --db data/omni.db
-```
-
 **Markdown (.md)**
 
-Sections are split on `# / ## / ###` headings to preserve semantic groupings.
-
-```bash
-uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db \
-    --source-type rulebook
-```
+Sections are split on `# / ## / ###` headings.
 
 **Plain Text (.txt)**
 
@@ -257,27 +322,22 @@ Freshly imported chunks have `embedding IS NULL`. Run `embed_chunks.py` to gener
 ### Examples
 
 ```bash
-# Import Markdown rulebook
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db
-
 # Add house rules from a text file
 uv run ai-agents/ocr_rulebook.py \
     data/houserules.txt \
     --source-type houserule \
     --db data/omni.db
 
-# Import PDF supplement
+# Add a corrections file (Markdown)
 uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/supplement.pdf \
-    --db data/omni.db \
-    --source-type rulebook
+    data/corrections.md \
+    --source-type correction \
+    --db data/omni.db
 ```
 
 ---
 
-## 5. embed_chunks.py
+## 6. embed_chunks.py
 
 Generates vector embeddings for rows in `rag_chunks` and `rag_chunks_opt` that do not have one yet.
 
@@ -299,7 +359,8 @@ uv run ai-agents/embed_chunks.py [options]
 
 1. With `--reembed-all`, set every `embedding` in `rag_chunks` and `rag_chunks_opt` back to NULL
 2. Fetch rows `WHERE embedding IS NULL` from each table, `--batch` at a time
-3. POST each row's text to `{embed_url}/v1/embeddings` as `{"model": <embed-model-id>, "input": <text>}`
+3. POST each row's text to `{embed_url}/v1/embeddings` as `{"model": <embed-model-id>, "input": <text>}`. For `rag_chunks`, when `section` is set the text is the section, a newline, then the body (the same as the orchestrator's `rag.EmbedInput`); for `rag_chunks_opt` it is the body only
+   - If the embedding server rejects the input as too large (mlx-serve's bge-m3-q8 takes up to 512 tokens; number-heavy tables can exceed it even when short), the end of the text is cut off and the request retried
 4. Store the returned vector (float32 array) as a BLOB in the `embedding` column, committing every `--batch` rows
 5. Repeat until no pending rows remain (rows that fail stay NULL and a warning is printed)
 
@@ -334,9 +395,11 @@ uv run ai-agents/embed_chunks.py \
 
 ---
 
-## 6. optimize_chunks.py
+## 7. optimize_chunks.py
 
 Uses a local LLM to rewrite `rag_chunks`, fixing OCR errors, stripping furigana, adding classification tags, and generating one-line summaries. Results go into `rag_chunks_opt` and are preferred over raw chunks in RAG retrieval.
+
+> This is an optional, legacy tool. `build_rulebook.py` removes ruby and noise deterministically, so it is normally not needed for the rulebook. `build_rulebook.py --apply` deletes the `rag_chunks_opt` rows of the rows it replaces.
 
 ### Synopsis
 
@@ -370,7 +433,7 @@ rag_chunks_opt.embedding
 
 ### Classification Tags
 
-The LLM selects one of eight tags per chunk:
+The LLM selects one of eight tags per chunk (`rag_chunks_opt.tag`, separate from the `rag_chunks.tag` set by `build_rulebook.py`):
 
 | Tag | Content |
 |-----|---------|
@@ -432,7 +495,7 @@ uv run ai-agents/optimize_chunks.py \
 
 ---
 
-## 7. generate_scenarios.py
+## 8. generate_scenarios.py
 
 Batch-generates scenario text and ComfyUI images, saving everything to the database.
 

@@ -107,39 +107,60 @@ SELECT COALESCE(opt_status,'unprocessed'), count(*)
 
 ### 2.4 Backup and Restore
 
+Keep backups in `data/backup/` (ignored by git). `build_rulebook.py --apply` also writes `data/backup/omni.bak-<timestamp>.db` automatically before it changes anything.
+
 ```bash
 # Backup (WAL mode makes plain cp unreliable — use sqlite3's built-in backup)
-sqlite3 data/omni.db ".backup 'data/omni_backup_$(date +%Y%m%d).db'"
+mkdir -p data/backup
+sqlite3 data/omni.db ".backup 'data/backup/omni_backup_$(date +%Y%m%d).db'"
+```
 
-# Restore
-cp data/omni_backup_YYYYMMDD.db data/omni.db
+Restore with the services stopped (while the orchestrator holds the DB open, an overwrite does not take effect):
+
+```bash
+pwsh scripts/Stop-Omni.ps1
+cp data/backup/<file>.db data/omni.db
+rm -f data/omni.db-shm data/omni.db-wal
+pwsh scripts/Start-Omni.ps1
 ```
 
 ---
 
 ## 3. Rulebook Management
 
-### 3.1 Importing a Rulebook
+### 3.1 (Re)importing the Rulebook
+
+The rulebook itself is rebuilt with `build_rulebook.py` from the OCR'd Markdown (default `data/rulebook/swordworld2.5_rulebook1.md`). It chunks by headings and paragraphs without cutting sentences, strips noise such as ruby readings, page numbers, the table of contents, layout elements and blank character-sheet forms, and labels each chunk with its part > chapter > heading and book pages. See [tools_en.md](tools_en.md#4-build_rulebookpy) for details.
+
+The procedure has three steps: preview, apply, embed.
 
 ```bash
-# Import Markdown or plain text
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db \
-    --source-type rulebook
+# 1. Preview only (DB untouched). Prints chunk counts per tag and writes logs/rulebook-preview.jsonl
+uv run ai-agents/build_rulebook.py
 
-# PDF import (uses pdfplumber)
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/rulebook.pdf \
-    --db data/omni.db
+# 2. Replace the rulebook rows in the DB (backs up to data/backup/ first)
+uv run ai-agents/build_rulebook.py --apply
+
+# 3. Generate embeddings (requires mlx-serve bge-m3-q8)
+uv run ai-agents/embed_chunks.py
 ```
+
+What `--apply` does:
+- Writes a backup to `data/backup/omni.bak-<timestamp>.db`
+- Deletes `source_type='rulebook'` rows whose `source` is `rulebook1` (the `--source` value) or empty, then inserts the new chunks (rows you disabled by hand are replaced too)
+- Keeps house rule and correction rows (`houserule` / `correction`)
+- Aborts without changing anything if a correction or house rule points at a row to be deleted via `overrides_id`. Re-point it in the UI and run again
+
+> `ocr_rulebook.py` cuts text mechanically every 500 characters, so do not use it for the rulebook itself. Use it only to add short house-rule or correction text files.
 
 Verify after import:
 
 ```bash
 sqlite3 data/omni.db \
-  "SELECT count(*) FROM rag_chunks WHERE source_type='rulebook';"
+  "SELECT tag, enabled, count(*) FROM rag_chunks WHERE source_type='rulebook' GROUP BY tag, enabled;"
 ```
+
+If something goes wrong, restore a file from `data/backup/` as described in [2.4](#24-backup-and-restore).
 
 ### 3.2 Generating Embedding Vectors
 
@@ -153,7 +174,7 @@ uv run ai-agents/embed_chunks.py \
     --batch 50
 ```
 
-Every row without an embedding in `rag_chunks` and `rag_chunks_opt` is processed.
+Every row without an embedding in `rag_chunks` and `rag_chunks_opt` is processed. For `rag_chunks` the embedded text is the section (part > chapter > heading), a newline, then the body. When a row (typically a table) exceeds the embedding server's input limit (512 tokens for bge-m3-q8), it is retried with the text shortened.
 
 Check progress:
 
@@ -168,55 +189,42 @@ When you change the embedding model, the vector dimension changes (e.g. 768 → 
 uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
 ```
 
-### 3.3 Chunk Optimization (Optional, Recommended)
+### 3.3 Chunk Optimization (Optional, Legacy)
 
-Uses an LLM to rewrite chunks, fixing OCR errors, removing furigana, adding tags, and generating summaries. Optimized chunks are preferred in RAG search.
+`optimize_chunks.py` uses an LLM to rewrite chunks into `rag_chunks_opt` (fixing OCR errors, removing furigana, adding tags, generating summaries). Optimized chunks, when present, are preferred in RAG search. Since `build_rulebook.py` removes ruby and noise deterministically, it is normally not needed for the rulebook. `--apply` also deletes the `rag_chunks_opt` rows of the rows it replaces.
 
 ```bash
 # Check current status
 uv run ai-agents/optimize_chunks.py --status
 
-# Run a batch (20 chunks at a time; best done during off-hours)
+# Run a batch (best done during off-hours)
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
     --model-url http://127.0.0.1:11441 \
     --embed-url http://127.0.0.1:11455
-
-# Retry failed chunks
-uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
-
-# Preview a single chunk (debug)
-uv run ai-agents/optimize_chunks.py --chunk-id 42 --dry-run
 ```
 
-### 3.4 Disabling Problem Chunks
+### 3.4 Disabling and Enabling Chunks
 
-Disable non-rule pages (covers, table of contents, colophons) to prevent noise in RAG results.
+`build_rulebook.py` leaves out covers, the table of contents, colophons, blank forms and similar noise at import time, so manual disabling is normally unnecessary. Disable a chunk only when you want to keep it out of RAG search.
+
+- In the UI: RULES tab → the chunk's Enable/Disable toggle (`enabled`). Each row shows its part > chapter > heading and book pages
+- The sample scenario 「蛮族を駆逐せよ」 (tag `scenario`) is imported disabled so the GM does not pull the scenario's story into a live session. Enable it in the RULES tab when you play that scenario
 
 ```bash
-# Via UI (recommended)
-# RULES tab → filter by source_type: rulebook
-# → click a chunk → toggle Enable/Disable
-
-# Or bulk-update with SQL
-sqlite3 data/omni.db << 'EOF'
-UPDATE rag_chunks
-SET enabled = 0
-WHERE source_type = 'rulebook'
-  AND (
-    text GLOB '*Sword World 2.5*Author*' OR
-    text GLOB '*Table of Contents*' OR
-    length(text) < 50
-  );
-EOF
+# With SQL (e.g. enable the whole sample scenario)
+sqlite3 data/omni.db \
+  "UPDATE rag_chunks SET enabled = 1 WHERE source_type='rulebook' AND tag='scenario';"
 ```
+
+> The enabled flag is stored on the chunk rows, so rebuilding with `build_rulebook.py --apply` resets it to the default (only the sample scenario disabled).
 
 ### 3.5 Adding House Rules and Corrections
 
-Add via the RULES screen or directly via the API.
+Add via the RULES screen or directly via the API. Rules added or edited through the UI or API are embedded right away and become searchable immediately. If embedding fails the rule is still saved (the `POST` response has `"embedded": false`); start mlx-serve and run `embed_chunks.py` later.
 
 ```bash
-# Via UI: RULES tab → "+ ADD" button (top right)
+# Via UI: RULES tab → "+ ADD" button (top right), or the correction button on a row
 
 # Via API
 curl -X POST http://localhost:8080/api/rules \
@@ -227,6 +235,8 @@ curl -X POST http://localhost:8080/api/rules \
     "text": "In this campaign, apply a +2 bonus to Willpower."
   }'
 ```
+
+While a correction or house rule with `overrides_id` set to an original chunk's ID is enabled, the original chunk is left out of RAG search and only the fix is used. Disabling the correction makes the original searchable again.
 
 ---
 
@@ -532,10 +542,9 @@ The previous stop did not complete. Run `pwsh scripts/Stop-Omni.ps1`, then start
 |-----------|------|---------|
 | Before each session | DB reset | `./setup.sh` |
 | Before each session | Review available quests | QUEST BOARD in UI |
-| Monthly | Chunk optimization batch | `optimize_chunks.py --limit 200` |
 | Monthly | Pre-generate scenarios | `generate_scenarios.py --count 5 --publish-quest` |
-| Monthly | Database backup | `sqlite3 data/omni.db ".backup 'backup.db'"` |
-| When rulebook updates | Re-import chunks | `ocr_rulebook.py` → `embed_chunks.py` |
+| Monthly | Database backup | `sqlite3 data/omni.db ".backup 'data/backup/omni_backup.db'"` |
+| When rulebook updates | Rebuild chunks | `build_rulebook.py` → `build_rulebook.py --apply` → `embed_chunks.py` |
 | As needed | Add house rules | RULES tab → "+ ADD" |
 
 ---

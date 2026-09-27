@@ -13,10 +13,11 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 1. [setup.sh — 初期構築・リセット](#1-setupsh)
 2. [Start-Omni.ps1 — サービス起動](#2-start-omnips1)
 3. [Stop-Omni.ps1 — サービス停止](#3-stop-omnips1)
-4. [ocr_rulebook.py — ルールブックインポート](#4-ocr_rulebookpy)
-5. [embed_chunks.py — 埋め込みベクトル生成](#5-embed_chunkspy)
-6. [optimize_chunks.py — チャンク最適化](#6-optimize_chunkspy)
-7. [generate_scenarios.py — シナリオバッチ生成](#7-generate_scenariospy)
+4. [build_rulebook.py — ルールブックの（再）構築](#4-build_rulebookpy)
+5. [ocr_rulebook.py — ハウスルール・訂正テキストのインポート](#5-ocr_rulebookpy)
+6. [embed_chunks.py — 埋め込みベクトル生成](#6-embed_chunkspy)
+7. [optimize_chunks.py — チャンク最適化（任意・旧方式）](#7-optimize_chunkspy)
+8. [generate_scenarios.py — シナリオバッチ生成](#8-generate_scenariospy)
 
 ---
 
@@ -67,6 +68,8 @@ ALTER TABLE rag_chunks ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1;
 ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id);
 ```
 
+`rag_chunks` の `source` / `section` / `page_from` / `page_to` 列は、オーケストレーターの起動時（`db.Open`）と `build_rulebook.py` / `embed_chunks.py` の実行時に自動で追加されます。
+
 ### 設定ファイル
 
 `config.env` から `DB_PATH` を読み込みます。未設定の場合は `data/omni.db` を使用。
@@ -82,7 +85,7 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 
 # フルリセット後のルールブックインポート例
 ./setup.sh --full
-uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md --db data/omni.db
+uv run ai-agents/build_rulebook.py --apply
 uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
 
@@ -191,9 +194,81 @@ pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 
 ---
 
-## 4. ocr_rulebook.py
+## 4. build_rulebook.py
 
-ルールブックのテキスト（PDF / Markdown / テキスト）を `rag_chunks` テーブルにインポートします。
+OCR 済みのルールブック Markdown から `rag_chunks` のルールブック行を作り直します。ルールブックの取り込みはこのスクリプトで行います。チャンク化の実装は `ai-agents/rulebook_chunker.py` にあります。
+
+### 概要
+
+```
+uv run ai-agents/build_rulebook.py [オプション]
+```
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | ルールブック Markdown |
+| `--db` | `data/omni.db` | DB ファイルパス |
+| `--source` | `rulebook1` | `rag_chunks.source` に入れる名前 |
+| `--skip-pages` | `1-4,242-245` | 除外する PDF ページ（表紙・目次と、奥付・カバー・記入用シート） |
+| `--preview` | `logs/rulebook-preview.jsonl` | 確認用 JSONL の出力先 |
+| `--apply` | — | DB のルールブック行を置き換える。省略時は確認のみ |
+
+### 確認のみ（既定）
+
+チャンクを組み立て、件数・文字数（最小 / 中央 / 最大）・タグ別の件数を表示し、全チャンクを `--preview` の JSONL に書き出します。DB は変更しません。
+
+### --apply
+
+1. DB を `data/backup/omni.bak-<日時>.db` にバックアップ（SQLite の backup API を使うので WAL 中でも整合）
+2. `source_type='rulebook'` で `source` が `--source` の値または空の行を削除（対応する `rag_chunks_opt` の行も削除）
+3. 新しいチャンクを追加（`embedding` は NULL）
+4. ハウスルール・訂正の行は残す。削除対象の行を `overrides_id` で参照している訂正・ハウスルールがあれば、何も変更せずに終了する（UI で参照先を付け替えてから再実行）
+
+続けて `embed_chunks.py` で埋め込みを作ります。
+
+### チャンクの作り方
+
+- `## ページ N` を PDF のページ区切りとして読む。PDF 1 ページは本の見開き 2 ページで、本のページは `2N-4` と `2N-3`
+- 目次（PDF 3〜4 ページ）を読み、本のページから部・章・項目を引く
+- 見出しと段落で区切り、文の途中では切らない（目安 600 文字。900 文字を超える段落は「。」で分割。表は 450 文字ごとに行単位で分割し、見出し行を繰り返す）
+- 「漢字（かな）」形式のルビを除去し、全角英数字を半角にする
+- 除外するもの: ページ番号だけの行、目次のリーダー行、イラストのクレジット、©GROUP SNE の行、チェック欄、誌面のレイアウト要素（サイドバー・ナビゲーション・フッター・能力チャートなど）、空欄の記入用表（本文行の半分以上が空、または 1 列目のラベルだけ）、サンプルキャラクターの記入済みシート（解説文は残す）、索引・デザイナーズノート・スタッフリストの章
+- 用語集のような短い見出し項目の連続は、`【見出し】` を付けて 1 チャンクにまとめる。短い末尾は前のチャンクに、短い導入は次のチャンクに付ける。同一テキストは重複を除く
+- 各チャンクに付ける値:
+  - `section`: 「部 > 章 > 項目 > 見出し階層」
+  - `page_from` / `page_to`: 本のページ
+  - `tag`: `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario`（目次と対応しない部分は `general`）
+- サンプルシナリオ「蛮族を駆逐せよ」の本文は tag `scenario`・`enabled=0` で取り込む（GM がシナリオの筋書きを通常のセッションに持ち込まないため）。UI の RULES 画面で有効にできる
+
+### 実行例
+
+```bash
+# 確認のみ
+uv run ai-agents/build_rulebook.py
+
+# 確認用 JSONL の中身を見る
+head -3 logs/rulebook-preview.jsonl
+
+# DB に反映して埋め込みを作る
+uv run ai-agents/build_rulebook.py --apply
+uv run ai-agents/embed_chunks.py
+```
+
+### テスト
+
+```bash
+cd ai-agents && uv run pytest
+```
+
+`ai-agents/tests/` にチャンク化のユニットテストがあります（pytest は dev 依存）。
+
+---
+
+## 5. ocr_rulebook.py
+
+短いハウスルール集・訂正集のテキスト（PDF / Markdown / テキスト）を `rag_chunks` テーブルにインポートします。
+
+> ルールブック本体には使わないでください。500 文字で機械的に切るため、ページ番号だけの断片・目次・記入用シートがそのまま入り、ルビも残ります。ルールブックは [build_rulebook.py](#4-build_rulebookpy) で取り込みます。
 
 ### 概要
 
@@ -204,12 +279,12 @@ uv run ai-agents/ocr_rulebook.py <ファイルパス> [オプション]
 | オプション | デフォルト | 説明 |
 |-----------|-----------|------|
 | `<ファイルパス>` | （必須） | インポートするファイル（.pdf / .md / .txt） |
-| `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule` |
+| `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule`（通常は `correction` か `houserule` を指定） |
 | `--db` | `data/omni.db` | DB ファイルパス |
 
 ### ソースタイプと優先度
 
-RAG 検索では優先度の高いチャンクが優先して使用されます。
+RAG 検索では、類似度が同じ場合に優先度の高いチャンクが優先されます。
 
 | ソースタイプ | 優先度 | 用途 |
 |-----------|--------|------|
@@ -223,19 +298,9 @@ RAG 検索では優先度の高いチャンクが優先して使用されます�
 
 `pdfplumber` を使ってテキストを抽出します。テキストが埋め込まれた PDF に対して動作します（スキャン画像 PDF は OCR 未対応）。
 
-```bash
-uv run ai-agents/ocr_rulebook.py data/rulebook/rulebook.pdf --db data/omni.db
-```
-
 **Markdown（.md）**
 
-`# / ## / ###` の見出しをセクション区切りとしてチャンク分割します。意味のまとまりを保った分割になります。
-
-```bash
-uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db \
-    --source-type rulebook
-```
+`# / ## / ###` の見出しをセクション区切りとしてチャンク分割します。
 
 **テキスト（.txt）**
 
@@ -257,27 +322,22 @@ sqlite3 data/omni.db \
 ### 実行例
 
 ```bash
-# ルールブック（Markdown）をインポート
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db
-
 # ハウスルールをテキストで追加
 uv run ai-agents/ocr_rulebook.py \
     data/houserules.txt \
     --source-type houserule \
     --db data/omni.db
 
-# PDF ルールブックをインポート
+# 訂正集（Markdown）を追加
 uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/supplement.pdf \
-    --db data/omni.db \
-    --source-type rulebook
+    data/corrections.md \
+    --source-type correction \
+    --db data/omni.db
 ```
 
 ---
 
-## 5. embed_chunks.py
+## 6. embed_chunks.py
 
 `rag_chunks` と `rag_chunks_opt` テーブル内の埋め込みが未生成の行にベクトルを生成します。
 
@@ -299,7 +359,8 @@ uv run ai-agents/embed_chunks.py [オプション]
 
 1. `--reembed-all` 指定時は `rag_chunks` と `rag_chunks_opt` の `embedding` をすべて NULL に戻す
 2. 各テーブルの `embedding IS NULL` の行を `--batch` 件ずつ取得
-3. 各行のテキストを `{embed_url}/v1/embeddings` に `{"model": <embed-model-id>, "input": <text>}` で POST
+3. 各行のテキストを `{embed_url}/v1/embeddings` に `{"model": <embed-model-id>, "input": <text>}` で POST。`rag_chunks` は `section` が空でなければ「section + 改行 + 本文」を送る（オーケストレーターの `rag.EmbedInput` と同じ）。`rag_chunks_opt` は本文のみ
+   - 埋め込みサーバが入力過大で拒否した場合（mlx-serve の bge-m3-q8 は 512 トークンまで。数字の多い表は文字数が少なくても超えることがある）、本文の末尾を削って再試行する
 4. 返ってきたベクトル（float32 配列）を BLOB として `embedding` カラムに保存し、`--batch` 件ごとにコミット
 5. 未処理の行がなくなるまで繰り返す（失敗した行は NULL のまま残し、警告を表示）
 
@@ -334,9 +395,11 @@ uv run ai-agents/embed_chunks.py \
 
 ---
 
-## 6. optimize_chunks.py
+## 7. optimize_chunks.py
 
 `rag_chunks` をローカル LLM で書き直し、OCR エラー修正・ルビ除去・タグ付与・要約生成を行います。最適化結果は `rag_chunks_opt` テーブルに保存され、RAG 検索で優先使用されます。
+
+> 任意・旧方式のツールです。`build_rulebook.py` がルビとノイズを決定的に取り除くため、ルールブックには通常不要です。`build_rulebook.py --apply` で置き換えた行の `rag_chunks_opt` は削除されます。
 
 ### 概要
 
@@ -370,7 +433,7 @@ rag_chunks_opt.embedding（再埋め込み）
 
 ### タグ一覧
 
-最適化 LLM が選択する 8 種類のタグ:
+最適化 LLM が選択する 8 種類のタグ（`rag_chunks_opt.tag`。`build_rulebook.py` が付ける `rag_chunks.tag` とは別）:
 
 | タグ | 内容 |
 |-----|------|
@@ -432,7 +495,7 @@ uv run ai-agents/optimize_chunks.py \
 
 ---
 
-## 7. generate_scenarios.py
+## 8. generate_scenarios.py
 
 シナリオのテキスト素材と ComfyUI 画像を一括生成してDBに保存します。
 

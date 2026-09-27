@@ -20,7 +20,7 @@ GM・NPC・サポート（リソース検証）を、ローカルで動く 1 つ
 | **画像生成** | ComfyUI（Stable Diffusion）でシーン画像・NPCポートレートを生成 |
 | **リアルタイムUI** | WebSocketで全クライアントにターン結果をリアルタイム配信 |
 | **チェックポイント** | セッション状態を自動保存・復元（最大10件） |
-| **バッチメンテナンス** | シナリオ事前生成・チャンク最適化をオフライン実行 |
+| **バッチメンテナンス** | ルールブックのチャンク化・埋め込み生成・シナリオ事前生成をオフライン実行 |
 
 ---
 
@@ -118,12 +118,16 @@ sw25-omni-master/
 │       └── utils/              # questEligibility.ts
 ├── ai-agents/                  # Python バッチツール
 │   ├── mlx_client.py           # mlx-serve 呼び出しの共通ヘルパー
-│   ├── ocr_rulebook.py         # ルールブックインポート
+│   ├── build_rulebook.py       # ルールブックの（再）構築
+│   ├── rulebook_chunker.py     # ルールブック Markdown のチャンク化
+│   ├── ocr_rulebook.py         # ハウスルール・訂正テキストのインポート
 │   ├── embed_chunks.py         # 埋め込み生成
-│   ├── optimize_chunks.py      # チャンク最適化
+│   ├── optimize_chunks.py      # チャンク最適化（任意・旧方式）
+│   ├── tests/                  # pytest（チャンク化のユニットテスト）
 │   └── generate_scenarios.py   # シナリオバッチ生成
 ├── data/
 │   ├── omni.db                 # SQLiteデータベース
+│   ├── backup/                 # DB バックアップ（git 管理外）
 │   ├── personas/               # NPC定義YAMLファイル
 │   ├── rulebook/               # インポート元ルールブック
 │   └── images/                 # 生成画像
@@ -212,19 +216,25 @@ sw25-omni-master/
 | `created_at` | DATETIME | 保存日時 |
 
 ### 6.5 rag_chunks
-ルールブックの分割チャンク（RAG検索のソース）。
+ルールブックの分割チャンク・ハウスルール・訂正（RAG検索のソース）。
 
 | カラム | 型 | 説明 |
 |--------|-----|------|
 | `id` | INTEGER PK | チャンクID |
 | `source_type` | TEXT | `rulebook` / `correction` / `houserule` |
 | `priority` | INTEGER | `20`=ハウスルール / `10`=修正 / `0`=ルールブック |
-| `tag` | TEXT | `combat` / `magic` / `item` / `character` / `world` / `rule` / `status` / `general` |
+| `tag` | TEXT | ルールブック行は `build_rulebook.py` が付ける `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario` / `general`。UI で追加した行は任意の文字列 |
 | `text` | TEXT | チャンクテキスト |
 | `enabled` | INTEGER | 1=有効 / 0=無効（RAG検索対象外） |
-| `overrides_id` | INTEGER FK | 修正対象のチャンクID |
+| `overrides_id` | INTEGER FK | 修正対象のチャンクID。この行が有効な間、参照先は RAG 検索から外れる |
 | `embedding` | BLOB | float32ベクトル（リトルエンディアン） |
 | `opt_status` | TEXT | `NULL`=未処理 / `done` / `failed` / `skip` |
+| `source` | TEXT | 取り込み元（例: `rulebook1`）。UI・API で追加した行は空 |
+| `section` | TEXT | 「部 > 章 > 項目 > 見出し」。埋め込み時は本文の前に付ける。空のこともある |
+| `page_from` | INTEGER | 本のページ（範囲の先頭）。不明なら NULL |
+| `page_to` | INTEGER | 本のページ（範囲の末尾）。不明なら NULL |
+
+`source` / `section` / `page_from` / `page_to` は、既存 DB にはオーケストレーター起動時（`db.Open`）と `build_rulebook.py` / `embed_chunks.py` の実行時に自動で追加されます。
 
 ### 6.6 rag_chunks_opt
 LLMで最適化済みのチャンク（RAG検索で優先使用）。
@@ -341,10 +351,12 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
 
 | メソッド | パス | 説明 |
 |--------|------|------|
-| `GET` | `/api/rules` | チャンク一覧（`?source_type=` フィルタ可） |
-| `POST` | `/api/rules` | ハウスルール・修正追加 |
-| `PATCH` | `/api/rules/{id}` | チャンク更新 |
+| `GET` | `/api/rules` | チャンク一覧（`?source_type=` フィルタ可）。各要素に `section` / `page_from` / `page_to` を含む（値があるときのみ） |
+| `POST` | `/api/rules` | ハウスルール・修正追加。保存後すぐ埋め込みを作り、レスポンスの `embedded`（true/false）で結果を返す |
+| `PATCH` | `/api/rules/{id}` | チャンク更新（本文・タグ・有効/無効）。更新後に埋め込みを作り直す |
 | `DELETE` | `/api/rules/{id}` | チャンク削除 |
+
+埋め込みに失敗しても（mlx-serve の埋め込みプロファイルが停止中など）ルールは保存されます。その行は `embedding` が NULL のまま残るので、後で `embed_chunks.py` で埋め込みます。
 
 ### シナリオ
 
@@ -382,7 +394,7 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
            │  チェックポイント  │ ← checkpoints 保存（自動）
            └────────┬─────────┘
            ┌────────▼─────────┐
-           │  RAG 検索         │ ← rag_chunks をコサイン類似度で検索
+           │  RAG 検索         │ ← プレイヤー入力で rag_chunks を検索（上位 5 件）
            │  (関連ルール抽出)  │   優先度: houserule > correction > rulebook
            └────────┬─────────┘
                     │ コンテキスト注入
@@ -394,7 +406,8 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
            │  個別行動 (YAML)  │
            └────────┬─────────┘
            ┌────────▼─────────┐
-           │  Support          │ ← HP/MP変化量を確定（JSON 配列）
+           │  Support          │ ← NPC の行動で RAG 検索（上位 3 件）し、
+           │                   │   HP/MP変化量を確定（JSON 配列）
            └────────┬─────────┘
            ┌────────▼─────────┐
            │  DB 状態更新      │ ← npc_sheets HP/MP・隊列更新
@@ -448,7 +461,7 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
 | **SESSION** | `session` | アクティブセッション: チャットログ・行動入力・バトルマップ・クエスト受注 |
 | **QUEST BOARD** | `quest` | クエスト一覧・パーティレベルによる適性フィルタ |
 | **PARTY** | `npc` | NPCステータス詳細・ポートレートアルバム・能力値編集 |
-| **RULES** | `rules` | ルールブック検索・ハウスルール追加・修正エントリ管理 |
+| **RULES** | `rules` | ルールブック検索・ハウスルール追加・修正エントリ管理・有効/無効の切り替え。各チャンクの部 > 章 > 見出しとページを表示 |
 
 ### DEV モード
 ヘッダーの「DEV MODE」ボタンで有効化。以下の機能が解放されます：
@@ -567,17 +580,48 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ## 12. RAG（ルール検索）仕様
 
 ### チャンク作成
-- ルールブック（PDF/Markdown）を `ocr_rulebook.py` でチャンク化
-- チャンクサイズ: 約500文字（セクション境界で分割）
+- ルールブック（OCR 済み Markdown）を `build_rulebook.py`（`rulebook_chunker.py`）でチャンク化
+  - 見出し・段落単位で、文の途中では切らない（目安 600 文字。900 文字を超える段落は「。」で分割、表は 450 文字ごとに行単位で分割して見出し行を繰り返す）
+  - ルビ・全角英数字・ページ番号・目次・レイアウト要素・空欄の記入用表・サンプルキャラクターの記入済みシートなどを決定的に除去
+  - 目次から本のページ → 部・章・項目を引き、各チャンクに `section`（部 > 章 > 項目 > 見出し）・`page_from` / `page_to`・`tag` を付ける
+  - サンプルシナリオ「蛮族を駆逐せよ」の本文は `tag='scenario'`・`enabled=0` で取り込む（GM がシナリオの筋書きを通常のセッションに持ち込まないため）
+  - `--apply` は DB を `data/backup/` にバックアップしてからルールブック行（`source` が `rulebook1` または空）を置き換える。ハウスルール・訂正は残す
+- 短いハウスルール集・訂正集のテキストは `ocr_rulebook.py` で追加できる（500 文字単位。ルールブック本体には使わない）
 - `embed_chunks.py` でベクトル化（mlx-serve の `bge-m3-q8`、1024 次元）
+  - `rag_chunks` は `section` が空でなければ「section + 改行 + 本文」を埋め込む（Go 側 `rag.EmbedInput` と同じ）。本文に話題名が出てこないチャンクも見出しで引けるようにするため
+  - 埋め込みサーバが入力過大で拒否した場合（bge-m3-q8 は 512 トークンまで）は、本文を短くして再試行する
+- UI / API（`POST /api/rules`・`PATCH /api/rules/{id}`）で追加・編集したルールは、オーケストレーターがその場で埋め込む
 - 埋め込みモデルを変えた場合はベクトルの次元が変わるため、全チャンクを再埋め込みする（`embed_chunks.py --reembed-all`）
+- `optimize_chunks.py`（LLM による書き直しで `rag_chunks_opt` を作る）は任意・旧方式。ルールブックには通常不要
 
 ### 検索アルゴリズム
 1. 入力テキストを埋め込みベクトルに変換
-2. `rag_chunks` 全行とコサイン類似度を計算
+2. 検索対象は `enabled=1` かつ埋め込み済みの行。ただし、有効な訂正・ハウスルールが `overrides_id` で参照しているチャンクは除外する（訂正側だけが使われる。無効な訂正は元チャンクを隠さない）
 3. 類似度順ソート → 同値は `priority` で優先（ハウスルール最優先）
 4. `rag_chunks_opt` が存在するチャンクはそちらのテキスト・ベクトルを優先使用
-5. 上位K件をGMのLLMプロンプトに注入
+5. 上位K件を整形してプロンプトに注入
+
+### 使用する段
+| 段 | 検索クエリ | 件数 | 用途 |
+|----|-----------|------|------|
+| GM | プレイヤー入力 | 5 | ナラティブ・ルーリングの参照 |
+| Support | NPC の行動（`action` と `dice`） | 3 | 魔法の消費MPなど、参照ルールに値があればそれに従って HP/MP を確定 |
+| NPC | — | — | ルールは渡さない |
+
+検索に失敗した場合や該当がない場合は、ルールなしで処理を続けます。
+
+### コンテキストの形式
+
+先頭に `【参照ルール】` を 1 回だけ置き、1 チャンク 1 行で並べます。
+
+```
+【参照ルール】
+[ハウスルール] <本文>
+[訂正] <本文>
+[<section> p.<page_from>-<page_to>] <本文>
+```
+
+ルールブックのチャンクは `section` と本のページをラベルにします（1 ページだけなら `p.<page_from>`、ページ不明なら省略、`section` が空なら `source_type`）。
 
 ### 優先度
 | `priority` | `source_type` | 説明 |

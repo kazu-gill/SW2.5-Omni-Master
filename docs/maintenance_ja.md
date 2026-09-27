@@ -107,39 +107,60 @@ SELECT COALESCE(opt_status,'unprocessed'), count(*)
 
 ### 2.4 バックアップとリストア
 
+バックアップは `data/backup/` に置きます（git 管理外）。`build_rulebook.py --apply` も実行前に `data/backup/omni.bak-<日時>.db` を自動で作ります。
+
 ```bash
 # バックアップ（WAL モードなので cp は不安定 → sqlite3 の backup を使う）
-sqlite3 data/omni.db ".backup 'data/omni_backup_$(date +%Y%m%d).db'"
+mkdir -p data/backup
+sqlite3 data/omni.db ".backup 'data/backup/omni_backup_$(date +%Y%m%d).db'"
+```
 
-# リストア
-cp data/omni_backup_YYYYMMDD.db data/omni.db
+リストアはサービスを止めてから行います（オーケストレーターが DB を開いたままだと上書きが反映されません）。
+
+```bash
+pwsh scripts/Stop-Omni.ps1
+cp data/backup/<ファイル名>.db data/omni.db
+rm -f data/omni.db-shm data/omni.db-wal
+pwsh scripts/Start-Omni.ps1
 ```
 
 ---
 
 ## 3. ルールブック管理
 
-### 3.1 ルールブックをインポートする
+### 3.1 ルールブックを（再）インポートする
+
+ルールブック本体は `build_rulebook.py` で OCR 済み Markdown（既定 `data/rulebook/swordworld2.5_rulebook1.md`）から作り直します。見出し・段落単位で文を切らずにチャンク化し、ルビ・ページ番号・目次・レイアウト要素・空欄の記入用シートなどのノイズを取り除き、各チャンクに「部 > 章 > 見出し」と本のページを付けます。詳細は [tools_ja.md](tools_ja.md#4-build_rulebookpy) を参照してください。
+
+手順は「確認 → 反映 → 埋め込み」の 3 段です。
 
 ```bash
-# Markdown / テキストファイルをインポート
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db \
-    --source-type rulebook
+# 1. 確認のみ（DB は変更しない）。タグ別のチャンク数を表示し、logs/rulebook-preview.jsonl に書き出す
+uv run ai-agents/build_rulebook.py
 
-# PDF の場合（pdfplumber 使用）
-uv run ai-agents/ocr_rulebook.py \
-    data/rulebook/rulebook.pdf \
-    --db data/omni.db
+# 2. DB のルールブック行を置き換える（実行前に data/backup/ へ自動バックアップ）
+uv run ai-agents/build_rulebook.py --apply
+
+# 3. 埋め込みを生成する（mlx-serve の bge-m3-q8 が必要）
+uv run ai-agents/embed_chunks.py
 ```
+
+`--apply` の動作:
+- `data/backup/omni.bak-<日時>.db` にバックアップを取る
+- `source_type='rulebook'` で `source` が `rulebook1`（`--source` の値）または空の行を削除し、新しいチャンクを追加する（手動で無効化していた行も含めて入れ替わる）
+- ハウスルール・訂正（`houserule` / `correction`）の行は残す
+- 削除対象の行を `overrides_id` で参照している訂正・ハウスルールがあると、何も変更せずに中止する。UI で参照先を付け替えてから再実行する
+
+> `ocr_rulebook.py` は 500 文字で機械的に切るため、ルールブック本体には使いません。短いハウスルール集・訂正集のテキストを追加するときだけ使います。
 
 インポート後の確認:
 
 ```bash
 sqlite3 data/omni.db \
-  "SELECT count(*) FROM rag_chunks WHERE source_type='rulebook';"
+  "SELECT tag, enabled, count(*) FROM rag_chunks WHERE source_type='rulebook' GROUP BY tag, enabled;"
 ```
+
+うまく戻らない場合は、[2.4](#24-バックアップとリストア) の手順で `data/backup/` のファイルからリストアします。
 
 ### 3.2 埋め込みベクトルを生成する
 
@@ -153,7 +174,7 @@ uv run ai-agents/embed_chunks.py \
     --batch 50
 ```
 
-`rag_chunks` と `rag_chunks_opt` の未埋め込み行をすべて処理します。
+`rag_chunks` と `rag_chunks_opt` の未埋め込み行をすべて処理します。`rag_chunks` は「section（部 > 章 > 見出し）+ 改行 + 本文」を埋め込みます。表などで埋め込みサーバの入力上限（bge-m3-q8 は 512 トークン）を超えた行は、本文を短くして再試行します。
 
 進捗確認:
 
@@ -168,55 +189,42 @@ sqlite3 data/omni.db \
 uv run ai-agents/embed_chunks.py --db data/omni.db --reembed-all
 ```
 
-### 3.3 チャンクを最適化する（任意・推奨）
+### 3.3 チャンクを最適化する（任意・旧方式）
 
-LLM でチャンクを書き直してOCRエラー修正・ルビ除去・タグ付与・要約を行います。最適化済みチャンクは RAG 検索で優先使用されます。
+`optimize_chunks.py` は LLM でチャンクを書き直して `rag_chunks_opt` に保存します（OCR エラー修正・ルビ除去・タグ付与・要約）。最適化済みチャンクがあれば RAG 検索で優先使用されます。`build_rulebook.py` がルビとノイズを決定的に取り除くため、ルールブックには通常不要です。`--apply` で置き換えた行の `rag_chunks_opt` も削除されます。
 
 ```bash
-# まず状況確認
+# 状況確認
 uv run ai-agents/optimize_chunks.py --status
 
-# バッチ実行（1回 20 件ずつ、システム未使用時間帯に実行推奨）
+# バッチ実行（システム未使用時間帯に実行推奨）
 uv run ai-agents/optimize_chunks.py \
     --limit 50 \
     --model-url http://127.0.0.1:11441 \
     --embed-url http://127.0.0.1:11455
-
-# 失敗したチャンクを再処理
-uv run ai-agents/optimize_chunks.py --retry-failed --limit 20
-
-# 特定チャンクのみ（デバッグ用）
-uv run ai-agents/optimize_chunks.py --chunk-id 42 --dry-run
 ```
 
-### 3.4 問題チャンクを無効化する
+### 3.4 チャンクを無効化・有効化する
 
-ルールと無関係なページ（表紙・目次・奥付）を無効化します。
+表紙・目次・奥付・記入用シートなどのノイズは `build_rulebook.py` が取り込み時に除外するため、手作業での無効化は通常不要です。特定のチャンクを RAG 検索から外したいときだけ無効化します。
+
+- UI の RULES タブ → 対象チャンクの「有効 / 無効」トグル（`enabled`）。各行には部 > 章 > 見出しと本のページが表示されます
+- サンプルシナリオ「蛮族を駆逐せよ」の本文（tag `scenario`）は、GM がシナリオの筋書きをセッションに持ち込まないよう、無効の状態で取り込まれます。このシナリオを遊ぶときは RULES タブで有効にします
 
 ```bash
-# RULES 画面での操作（推奨）
-# UI の RULES タブ → source_type: rulebook でフィルタ
-# → 対象チャンクの「編集」→「有効/無効」トグル
-
-# または SQL で一括操作
-sqlite3 data/omni.db << 'EOF'
-UPDATE rag_chunks
-SET enabled = 0
-WHERE source_type = 'rulebook'
-  AND (
-    text GLOB '*ソード・ワールド2.5*著*' OR
-    text GLOB '*目次*' OR
-    length(text) < 50
-  );
-EOF
+# SQL で操作する場合（例: サンプルシナリオをまとめて有効化）
+sqlite3 data/omni.db \
+  "UPDATE rag_chunks SET enabled = 1 WHERE source_type='rulebook' AND tag='scenario';"
 ```
 
-### 3.5 ハウスルール・修正を追加する
+> 無効化の状態はチャンクの行に保存されるため、`build_rulebook.py --apply` で作り直すと初期状態（サンプルシナリオのみ無効）に戻ります。
 
-RULES 画面（UI）から追加するか、直接 API を呼び出します。
+### 3.5 ハウスルール・訂正を追加する
+
+RULES 画面（UI）から追加するか、直接 API を呼び出します。UI / API で追加・編集したルールはその場で埋め込まれ、すぐに RAG 検索の対象になります。埋め込みに失敗した場合もルールは保存されるので（`POST` のレスポンスが `"embedded": false`）、mlx-serve を起動してから `embed_chunks.py` を実行してください。
 
 ```bash
-# UI を使う場合: RULES タブ → 右上の「+ 追加」ボタン
+# UI を使う場合: RULES タブ → 右上の「+ 追加」ボタン、または各行の訂正ボタン
 
 # API を使う場合
 curl -X POST http://localhost:8080/api/rules \
@@ -227,6 +235,8 @@ curl -X POST http://localhost:8080/api/rules \
     "text": "このキャンペーンでは精神抵抗力に+2のボーナスを適用する"
   }'
 ```
+
+`overrides_id` に元チャンクの ID を指定した訂正・ハウスルールが有効な間は、元チャンクは RAG 検索から外れ、訂正側だけが使われます。訂正を無効にすると元チャンクが再び検索対象になります。
 
 ---
 
@@ -532,10 +542,9 @@ pwsh scripts/Start-Omni.ps1
 |------|------|---------|
 | セッション前 | DB リセット | `./setup.sh` |
 | セッション前 | 最新クエスト確認 | UI の QUEST BOARD |
-| 月1回 | チャンク最適化バッチ | `optimize_chunks.py --limit 200` |
 | 月1回 | シナリオ事前生成 | `generate_scenarios.py --count 5 --publish-quest` |
-| 月1回 | DB バックアップ | `sqlite3 data/omni.db ".backup 'backup.db'"` |
-| ルールブック更新時 | チャンクインポート | `ocr_rulebook.py` → `embed_chunks.py` |
+| 月1回 | DB バックアップ | `sqlite3 data/omni.db ".backup 'data/backup/omni_backup.db'"` |
+| ルールブック更新時 | チャンク再構築 | `build_rulebook.py` → `build_rulebook.py --apply` → `embed_chunks.py` |
 | 随時 | ハウスルール追加 | RULES タブ → 「+ 追加」 |
 
 ---

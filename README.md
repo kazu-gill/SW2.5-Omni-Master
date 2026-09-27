@@ -21,7 +21,7 @@
 | **リアルタイム UI** | WebSocket + React によるバトルマップと GM チャンネル |
 | **画像生成** | ComfyUI (Stable Diffusion) によるシーン画像・NPC ポートレートの自動生成 (オプション) |
 | **セッションチェックポイント** | 最大 10 スナップショットの自動保存と任意時点への復元 |
-| **バッチメンテナンス** | ルールブックの OCR インポート、シナリオのオフライン事前生成 |
+| **バッチメンテナンス** | ルールブック Markdown のチャンク化・インポート、シナリオのオフライン事前生成 |
 
 ---
 
@@ -52,10 +52,10 @@ Go Orchestrator  :8080
 
 1. プレイヤーが UI から行動を入力
 2. Orchestrator がチェックポイントを保存
-3. RAG でルールブックから関連チャンクを検索
+3. RAG でプレイヤー入力に関連するルールを検索 (上位 5 件)
 4. GM が RAG コンテキスト付きでナラティブを生成
 5. NPC 1 → NPC 2 → NPC 3 の順 (シート順) にアクションを生成
-6. Support がリソース変更 (HP/MP) を確定
+6. Support が NPC の行動から引いたルール (上位 3 件) を参照してリソース変更 (HP/MP) を確定
 7. DB (HP/MP・隊列・ログ) を更新
 8. ターン結果を WebSocket で全クライアントへブロードキャスト
 9. ComfyUI が非同期でシーン画像を生成 (有効時)
@@ -140,14 +140,18 @@ COMFY_URL=http://<ComfyUI-HOST>:8188
 ### 4. ルールブックのインポート (推奨)
 
 ```bash
-# Markdown / PDF / テキストファイルを rag_chunks テーブルに取り込む
-uv run ai-agents/ocr_rulebook.py data/rulebook/swordworld2.5_rulebook1.md \
-    --db data/omni.db
+# ルールブック Markdown (data/rulebook/swordworld2.5_rulebook1.md) をチャンク化して確認する (DB は変更しない)
+uv run ai-agents/build_rulebook.py
+
+# 確認できたら DB のルールブック行を置き換える (実行前に data/backup/ へバックアップ)
+uv run ai-agents/build_rulebook.py --apply
 
 # 埋め込みベクターを生成する (mlx-serve の bge-m3-q8 が起動している必要あり)
-uv run ai-agents/embed_chunks.py --db data/omni.db
+uv run ai-agents/embed_chunks.py
 ```
 
+> 付属のサンプルシナリオ本文は無効 (`enabled=0`) の状態で取り込まれます。使う場合は UI のルール画面で有効にしてください。
+>
 > 埋め込みモデルを変更した場合はベクトルの次元が変わるため、`--reembed-all` で全チャンクを再埋め込みしてください。
 
 ### 5. フロントエンド依存関係のインストール
@@ -220,10 +224,20 @@ Go Orchestrator と Vite Dev Server を停止します。mlx-serve のプロフ�
 ### ルールブックのインポート
 
 ```bash
-uv run ai-agents/ocr_rulebook.py <file> [--source-type rulebook|correction|houserule] [--db PATH]
+uv run ai-agents/build_rulebook.py [--md PATH] [--db PATH] [--source rulebook1] [--skip-pages 1-4,242-245] [--preview PATH] [--apply]
 ```
 
-- `.pdf` / `.md` / `.txt` 形式に対応
+- OCR 済みルールブック Markdown を見出し・段落単位でチャンク化 (文の途中で切らない)。ルビ・ページ番号・目次・レイアウト要素・記入用シートなどのノイズを除き、各チャンクに「部 > 章 > 見出し」と本のページを付ける
+- 既定は確認のみ (`logs/rulebook-preview.jsonl` を書き出す)。`--apply` で DB をバックアップしてからルールブック行を置き換える (ハウスルール・訂正は残す)
+- 実装は `ai-agents/rulebook_chunker.py`
+
+### ハウスルール・訂正テキストの追加
+
+```bash
+uv run ai-agents/ocr_rulebook.py <file> [--source-type correction|houserule] [--db PATH]
+```
+
+- 短いハウスルール集・訂正集 (`.pdf` / `.md` / `.txt`) を 500 文字単位で取り込む。ルールブック本体には使わない
 - `--source-type` で優先度を制御 (`houserule`=20 → `correction`=10 → `rulebook`=0)
 
 ### 埋め込みベクターの生成
@@ -233,15 +247,16 @@ uv run ai-agents/embed_chunks.py [--db PATH] [--embed-url URL] [--embed-model-id
 ```
 
 - `rag_chunks` / `rag_chunks_opt` テーブルの未埋め込み行をすべて処理 (`--batch` 件ごとにコミット)
+- `rag_chunks` は「section + 改行 + 本文」を埋め込む。埋め込みサーバが入力過大で拒否した場合は本文を短くして再試行
 - `--reembed-all`: 既存の埋め込みを消して全件作り直す (埋め込みモデルを変えたとき)
 
-### チャンクの最適化
+### チャンクの最適化 (任意・旧方式)
 
 ```bash
 uv run ai-agents/optimize_chunks.py [--db PATH] [--model-url URL] [--model-id ID] [--embed-url URL] [--embed-model-id ID]
 ```
 
-- LLM でチャンクテキストを書き換え、RAG の検索精度を向上
+- LLM でチャンクテキストを書き換えて `rag_chunks_opt` に保存する。`build_rulebook.py` がルビ・ノイズを除去するため、ルールブックには通常不要
 
 ### シナリオのバッチ生成
 
@@ -311,6 +326,9 @@ uv sync
 
 # 個別スクリプトの実行
 uv run <script>.py --help
+
+# テスト (tests/ 以下。pytest は dev 依存)
+uv run pytest
 ```
 
 ---
@@ -327,6 +345,7 @@ uv run <script>.py --help
 | [docs/tools_en.md](docs/tools_en.md) | Batch Tools Reference (English) |
 | [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
 | [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
+| [docs/rulebook-rebuild-20260927.md](docs/rulebook-rebuild-20260927.md) | ルールブック RAG データの作り直し記録 |
 
 ---
 

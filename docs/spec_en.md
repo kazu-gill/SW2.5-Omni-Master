@@ -18,7 +18,7 @@
 | **Image Generation** | ComfyUI (Stable Diffusion) generates scene images and NPC portraits |
 | **Real-time UI** | WebSocket broadcasts turn results to all connected clients |
 | **Checkpoints** | Session state is auto-saved and restorable (up to 10 per session) |
-| **Batch Maintenance** | Scenario pre-generation and chunk optimization run offline |
+| **Batch Maintenance** | Rulebook chunking, embedding generation and scenario pre-generation run offline |
 
 ---
 
@@ -115,12 +115,16 @@ sw25-omni-master/
 │       └── utils/              # questEligibility.ts
 ├── ai-agents/                  # Python batch tools
 │   ├── mlx_client.py           # Shared mlx-serve helpers
-│   ├── ocr_rulebook.py         # Rulebook importer
+│   ├── build_rulebook.py       # Rulebook (re)builder
+│   ├── rulebook_chunker.py     # Rulebook Markdown chunker
+│   ├── ocr_rulebook.py         # House rule / correction text importer
 │   ├── embed_chunks.py         # Embedding generator
-│   ├── optimize_chunks.py      # Chunk optimizer
+│   ├── optimize_chunks.py      # Chunk optimizer (optional, legacy)
+│   ├── tests/                  # pytest (chunker unit tests)
 │   └── generate_scenarios.py   # Scenario batch generator
 ├── data/
 │   ├── omni.db                 # SQLite database
+│   ├── backup/                 # DB backups (ignored by git)
 │   ├── personas/               # NPC persona YAML files
 │   ├── rulebook/               # Source rulebook files
 │   └── images/                 # Generated images
@@ -206,18 +210,24 @@ Turn-level snapshots for session restore (max 10 per session).
 | `created_at` | DATETIME | Save timestamp |
 
 ### 6.5 rag_chunks
-Rulebook text split into searchable chunks.
+Rulebook text split into searchable chunks, plus house rules and corrections.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `source_type` | TEXT | `rulebook` / `correction` / `houserule` |
 | `priority` | INTEGER | `20`=houserule / `10`=correction / `0`=rulebook |
-| `tag` | TEXT | `combat` / `magic` / `item` / `character` / `world` / `rule` / `status` / `general` |
+| `tag` | TEXT | Rulebook rows: `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario` / `general`, set by `build_rulebook.py`. Rows added in the UI: any string |
 | `text` | TEXT | Chunk text |
 | `enabled` | INTEGER | 1=active for RAG / 0=excluded |
-| `overrides_id` | INTEGER FK | ID of the chunk this corrects |
+| `overrides_id` | INTEGER FK | ID of the chunk this corrects. While this row is enabled, the referenced chunk is left out of RAG search |
 | `embedding` | BLOB | float32 vector (little-endian) |
 | `opt_status` | TEXT | `NULL`=unprocessed / `done` / `failed` / `skip` |
+| `source` | TEXT | Import source (e.g. `rulebook1`). Empty for rows added through the UI / API |
+| `section` | TEXT | Part > chapter > item > heading. Prepended to the body when embedding. May be empty |
+| `page_from` | INTEGER | Book page (start of range). NULL if unknown |
+| `page_to` | INTEGER | Book page (end of range). NULL if unknown |
+
+On an existing DB, `source` / `section` / `page_from` / `page_to` are added automatically when the orchestrator starts (`db.Open`) and when `build_rulebook.py` / `embed_chunks.py` run.
 
 ### 6.6 rag_chunks_opt
 LLM-optimized variants of chunks (preferred in RAG search).
@@ -330,10 +340,12 @@ Images linked to scenarios (`scenario_id=NULL` means shared background).
 
 | Method | Path | Description |
 |--------|------|-------------|
-| `GET` | `/api/rules` | List chunks (filter: `?source_type=`) |
-| `POST` | `/api/rules` | Add houserule or correction |
-| `PATCH` | `/api/rules/{id}` | Update chunk |
+| `GET` | `/api/rules` | List chunks (filter: `?source_type=`). Each item includes `section` / `page_from` / `page_to` when set |
+| `POST` | `/api/rules` | Add houserule or correction. Embedded right after saving; the response reports the result as `embedded` (true/false) |
+| `PATCH` | `/api/rules/{id}` | Update chunk (text, tag, enabled). Re-embedded after the update |
 | `DELETE` | `/api/rules/{id}` | Delete chunk |
+
+If embedding fails (e.g. the mlx-serve embedding profile is down), the rule is still saved. Its `embedding` stays NULL; embed it later with `embed_chunks.py`.
 
 ### Scenarios
 
@@ -371,7 +383,7 @@ Player → POST /api/turn
        │  Checkpoint      │ ← Save checkpoint (auto)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  RAG Search      │ ← Cosine similarity on rag_chunks
+       │  RAG Search      │ ← Search rag_chunks with the player input (top 5)
        │  (extract rules) │   Priority: houserule > correction > rulebook
        └────────┬─────────┘
                 │ Context injection
@@ -383,7 +395,8 @@ Player → POST /api/turn
        │  Actions (YAML)  │   Based on each NPC's persona
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  Support         │ ← Confirm HP/MP deltas (JSON array)
+       │  Support         │ ← RAG search with the NPCs' actions (top 3),
+       │                  │   then confirm HP/MP deltas (JSON array)
        └────────┬─────────┘
        ┌────────▼─────────┐
        │  DB Update       │ ← Update npc_sheets HP/MP and lanes
@@ -437,7 +450,7 @@ Embeddings are requested from `/v1/embeddings` with `{"model": EMBED_MODEL_ID, "
 | **SESSION** | `session` | Active gameplay: chat log, action input, battle map, quest acceptance |
 | **QUEST BOARD** | `quest` | Quest list with party-level eligibility filter |
 | **PARTY** | `npc` | NPC stats, portrait album, attribute editing |
-| **RULES** | `rules` | Rulebook search, houserule entry, correction management |
+| **RULES** | `rules` | Rulebook search, houserule entry, correction management, enable/disable toggle. Shows each chunk's part > chapter > heading and pages |
 
 ### DEV Mode
 Activated via the "DEV MODE" button in the header. Unlocks:
@@ -555,17 +568,48 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ## 12. RAG (Rule Search) Specification
 
 ### Chunk Creation
-- Import rulebook (PDF/Markdown) via `ocr_rulebook.py`
-- Chunk size: ~500 characters (split at section boundaries)
+- Chunk the rulebook (OCR'd Markdown) with `build_rulebook.py` (`rulebook_chunker.py`)
+  - Split by headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters split at 「。」; tables split by rows every 450 characters with the header row repeated)
+  - Ruby readings, full-width alphanumerics, page numbers, the table of contents, layout elements, blank form tables, the sample characters' filled sheets and similar noise are removed deterministically
+  - Book pages are mapped to part / chapter / item via the table of contents, and each chunk gets `section` (part > chapter > item > heading), `page_from` / `page_to` and `tag`
+  - The sample scenario 「蛮族を駆逐せよ」 is imported with `tag='scenario'` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions
+  - `--apply` backs up the DB to `data/backup/`, then replaces the rulebook rows (`source` = `rulebook1` or empty). House rules and corrections are kept
+- Short house-rule or correction text files can be added with `ocr_rulebook.py` (500-character chunks; not for the rulebook itself)
 - Vectorize via `embed_chunks.py` (mlx-serve `bge-m3-q8`, 1024-dim)
+  - For `rag_chunks`, when `section` is set the embedded text is the section, a newline, then the body (the same as Go's `rag.EmbedInput`), so a query about a topic also matches chunks whose body never names it
+  - If the embedding server rejects the input as too large (bge-m3-q8 takes up to 512 tokens), the text is shortened and retried
+- Rules added or edited through the UI / API (`POST /api/rules`, `PATCH /api/rules/{id}`) are embedded by the orchestrator immediately
 - When the embedding model changes, the vector dimension changes too, so re-embed every chunk (`embed_chunks.py --reembed-all`)
+- `optimize_chunks.py` (LLM rewrite into `rag_chunks_opt`) is optional and legacy; normally not needed for the rulebook
 
 ### Search Algorithm
 1. Convert input text to an embedding vector
-2. Compute cosine similarity against all `rag_chunks` rows
-3. Sort by similarity; ties broken by `priority` (houserule first)
+2. Candidates are rows with `enabled=1` and an embedding, except chunks that an enabled correction or house rule overrides via `overrides_id` (only the fix is used; a disabled correction does not hide the original)
+3. Sort by cosine similarity; ties broken by `priority` (houserule first)
 4. If `rag_chunks_opt` exists for a chunk, use its text and vector instead
-5. Inject top-K results into the GM LLM prompt
+5. Format the top-K results and inject them into the prompt
+
+### Stages That Use It
+| Stage | Query | Count | Purpose |
+|-------|-------|-------|---------|
+| GM | Player input | 5 | Reference for narration and rulings |
+| Support | NPCs' actions (`action` and `dice`) | 3 | Follow values given in the rules (e.g. spell MP cost) when confirming HP/MP |
+| NPC | — | — | No rules are given |
+
+If the search fails or finds nothing, the stage continues without rules.
+
+### Context Format
+
+The header `【参照ルール】` appears once, followed by one line per chunk:
+
+```
+【参照ルール】
+[ハウスルール] <text>
+[訂正] <text>
+[<section> p.<page_from>-<page_to>] <text>
+```
+
+Rulebook chunks are labeled with their `section` and book pages (`p.<page_from>` for a single page, no page when unknown, `source_type` when `section` is empty).
 
 ### Priority Levels
 | `priority` | `source_type` | Description |

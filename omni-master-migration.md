@@ -211,7 +211,7 @@ func (e *Engine) runStage(ctx, stage string, msgs []llm.Message, opts llm.Comple
 | 0 | ✅ | R1 (MTP で thinking) / R2 (seed) とも OK。`docs/mlx-serve-client-notes.md` |
 | 1〜3 | ✅ | Go 側。1 モデル直列化 + 段ごとの検証・再思考。`go test ./...` 通過 |
 | 4 | ✅ | `scripts/Start-Omni.ps1` / `Stop-Omni.ps1`。`start.sh` / `stop.sh` は削除待ち (ユーザー確認) |
-| 5 | ✅ (一部) | バッチツールを mlx-serve 対応、`--reembed-all` を追加。**このマシンにはルールブックが未投入のため、再埋め込みと RAG 検索の見比べ (手順 4・5) は未実施** |
+| 5 | ✅ | バッチツールを mlx-serve 対応。旧環境の DB を移植し、ルールブックのチャンクを原本から作り直して埋め込んだ (`docs/rulebook-rebuild-20260927.md`) |
 | 6 | ✅ | `docs/verification-serial-20260927.md`。中央値 19 秒/ターン、再思考 0 回 |
 | 7 | ✅ | `data/schema.sql` 削除、`mise.toml` / Volta pin、README・docs 更新 |
 
