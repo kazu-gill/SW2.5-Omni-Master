@@ -34,8 +34,8 @@ TABLES = [
 def embed_fitting(url: str, model_id: str, text: str) -> list[float]:
     """埋め込む。サーバの入力上限 (バッチサイズ) を超えたら、末尾を削って再試行する。
 
-    mlx-serve の bge-m3 プロファイルは 512 トークンまで。数字の多い表などは
-    文字数が少なくても超えることがある。先頭 (見出しと本文の冒頭) が残れば検索には足りる。
+    mlx-serve の bge-m3 プロファイルは 1 入力 2048 トークンまで (ctx_size / parallel)。
+    ふつうのチャンクは収まるが、上限を超えたときの保険として残す。先頭 (見出しと本文の冒頭) が残れば検索には足りる。
     """
     for _ in range(4):
         try:

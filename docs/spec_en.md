@@ -136,9 +136,7 @@ sw25-omni-master/
 ├── scripts/
 │   ├── Start-Omni.ps1          # Start orchestrator + UI
 │   └── Stop-Omni.ps1           # Stop orchestrator + UI
-├── setup.sh                    # DB initialization / reset
-├── start.sh                    # Legacy start script (deprecated, to be removed)
-└── stop.sh                     # Legacy stop script (deprecated, to be removed)
+└── setup.sh                    # DB initialization / reset
 ```
 
 ---
@@ -569,7 +567,7 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 
 ### Chunk Creation
 - Chunk the rulebook (OCR'd Markdown) with `build_rulebook.py` (`rulebook_chunker.py`)
-  - Split by headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters split at 「。」; tables split by rows every 450 characters with the header row repeated)
+  - Split by headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters split at 「。」; tables split by rows every 900 characters with the header row repeated)
   - Ruby readings, full-width alphanumerics, page numbers, the table of contents, layout elements, blank form tables, the sample characters' filled sheets and similar noise are removed deterministically
   - Book pages are mapped to part / chapter / item via the table of contents, and each chunk gets `section` (part > chapter > item > heading), `page_from` / `page_to` and `tag`
   - The sample scenario 「蛮族を駆逐せよ」 is imported with `tag='scenario'` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions
@@ -577,7 +575,7 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 - Short house-rule or correction text files can be added with `ocr_rulebook.py` (500-character chunks; not for the rulebook itself)
 - Vectorize via `embed_chunks.py` (mlx-serve `bge-m3-q8`, 1024-dim)
   - For `rag_chunks`, when `section` is set the embedded text is the section, a newline, then the body (the same as Go's `rag.EmbedInput`), so a query about a topic also matches chunks whose body never names it
-  - If the embedding server rejects the input as too large (bge-m3-q8 takes up to 512 tokens), the text is shortened and retried
+  - If the embedding server rejects the input as too large (bge-m3-q8 takes up to 2048 tokens per input; normal chunks fit), the text is shortened and retried
 - Rules added or edited through the UI / API (`POST /api/rules`, `PATCH /api/rules/{id}`) are embedded by the orchestrator immediately
 - When the embedding model changes, the vector dimension changes too, so re-embed every chunk (`embed_chunks.py --reembed-all`)
 - `optimize_chunks.py` (LLM rewrite into `rag_chunks_opt`) is optional and legacy; normally not needed for the rulebook

@@ -32,8 +32,6 @@ Startup order:
 
 PIDs are recorded in `.pids`. If `.pids` is left over, the script refuses to start to avoid a double launch (run `Stop-Omni.ps1` first).
 
-> `start.sh` / `stop.sh` are legacy scripts from the old setup (which launched llama-server directly). They are deprecated and will be removed.
-
 Verification:
 - UI: `http://localhost:5173`
 - API: `http://localhost:8080`
@@ -174,7 +172,7 @@ uv run ai-agents/embed_chunks.py \
     --batch 50
 ```
 
-Every row without an embedding in `rag_chunks` and `rag_chunks_opt` is processed. For `rag_chunks` the embedded text is the section (part > chapter > heading), a newline, then the body. When a row (typically a table) exceeds the embedding server's input limit (512 tokens for bge-m3-q8), it is retried with the text shortened.
+Every row without an embedding in `rag_chunks` and `rag_chunks_opt` is processed. For `rag_chunks` the embedded text is the section (part > chapter > heading), a newline, then the body. When a row (typically a table) exceeds the embedding server's input limit (2048 tokens per input for bge-m3-q8), it is retried with the text shortened.
 
 Check progress:
 

@@ -32,8 +32,6 @@ pwsh scripts/Start-Omni.ps1           # ログを追従する場合は -Follow
 
 PID は `.pids` に記録されます。`.pids` が残っている場合は二重起動を防ぐため起動しません（先に `Stop-Omni.ps1` を実行）。
 
-> `start.sh` / `stop.sh` は旧構成（llama-server を直接起動）用のスクリプトで、非推奨です。今後削除します。
-
 起動確認:
 - UI: `http://localhost:5173`
 - API: `http://localhost:8080`
@@ -174,7 +172,7 @@ uv run ai-agents/embed_chunks.py \
     --batch 50
 ```
 
-`rag_chunks` と `rag_chunks_opt` の未埋め込み行をすべて処理します。`rag_chunks` は「section（部 > 章 > 見出し）+ 改行 + 本文」を埋め込みます。表などで埋め込みサーバの入力上限（bge-m3-q8 は 512 トークン）を超えた行は、本文を短くして再試行します。
+`rag_chunks` と `rag_chunks_opt` の未埋め込み行をすべて処理します。`rag_chunks` は「section（部 > 章 > 見出し）+ 改行 + 本文」を埋め込みます。表などで埋め込みサーバの入力上限（bge-m3-q8 は 1 入力 2048 トークン）を超えた行は、本文を短くして再試行します。
 
 進捗確認:
 

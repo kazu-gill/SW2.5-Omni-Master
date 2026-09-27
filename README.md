@@ -192,8 +192,6 @@ pwsh scripts/Stop-Omni.ps1
 
 Go Orchestrator と Vite Dev Server を停止します。mlx-serve のプロファイルは停止しません。
 
-> `start.sh` / `stop.sh` は旧構成用のスクリプトで、非推奨です。今後削除します。
-
 ---
 
 ## 設定リファレンス (Configuration)
@@ -346,6 +344,7 @@ uv run pytest
 | [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
 | [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
 | [docs/rulebook-rebuild-20260927.md](docs/rulebook-rebuild-20260927.md) | ルールブック RAG データの作り直し記録 |
+| [docs/ocr-suspects-20260927.md](docs/ocr-suspects-20260927.md) | ルールブック OCR 誤字の候補一覧 |
 
 ---
 

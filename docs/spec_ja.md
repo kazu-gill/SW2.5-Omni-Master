@@ -139,9 +139,7 @@ sw25-omni-master/
 ├── scripts/
 │   ├── Start-Omni.ps1          # オーケストレーター + UI 起動
 │   └── Stop-Omni.ps1           # オーケストレーター + UI 停止
-├── setup.sh                    # DB初期化・リセット
-├── start.sh                    # 旧起動スクリプト（非推奨・削除予定）
-└── stop.sh                     # 旧停止スクリプト（非推奨・削除予定）
+└── setup.sh                    # DB初期化・リセット
 ```
 
 ---
@@ -581,7 +579,7 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 
 ### チャンク作成
 - ルールブック（OCR 済み Markdown）を `build_rulebook.py`（`rulebook_chunker.py`）でチャンク化
-  - 見出し・段落単位で、文の途中では切らない（目安 600 文字。900 文字を超える段落は「。」で分割、表は 450 文字ごとに行単位で分割して見出し行を繰り返す）
+  - 見出し・段落単位で、文の途中では切らない（目安 600 文字。900 文字を超える段落は「。」で分割、表は 900 文字ごとに行単位で分割して見出し行を繰り返す）
   - ルビ・全角英数字・ページ番号・目次・レイアウト要素・空欄の記入用表・サンプルキャラクターの記入済みシートなどを決定的に除去
   - 目次から本のページ → 部・章・項目を引き、各チャンクに `section`（部 > 章 > 項目 > 見出し）・`page_from` / `page_to`・`tag` を付ける
   - サンプルシナリオ「蛮族を駆逐せよ」の本文は `tag='scenario'`・`enabled=0` で取り込む（GM がシナリオの筋書きを通常のセッションに持ち込まないため）
@@ -589,7 +587,7 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 - 短いハウスルール集・訂正集のテキストは `ocr_rulebook.py` で追加できる（500 文字単位。ルールブック本体には使わない）
 - `embed_chunks.py` でベクトル化（mlx-serve の `bge-m3-q8`、1024 次元）
   - `rag_chunks` は `section` が空でなければ「section + 改行 + 本文」を埋め込む（Go 側 `rag.EmbedInput` と同じ）。本文に話題名が出てこないチャンクも見出しで引けるようにするため
-  - 埋め込みサーバが入力過大で拒否した場合（bge-m3-q8 は 512 トークンまで）は、本文を短くして再試行する
+  - 埋め込みサーバが入力過大で拒否した場合（bge-m3-q8 は 1 入力 2048 トークンまで。通常のチャンクは収まる）は、本文を短くして再試行する
 - UI / API（`POST /api/rules`・`PATCH /api/rules/{id}`）で追加・編集したルールは、オーケストレーターがその場で埋め込む
 - 埋め込みモデルを変えた場合はベクトルの次元が変わるため、全チャンクを再埋め込みする（`embed_chunks.py --reembed-all`）
 - `optimize_chunks.py`（LLM による書き直しで `rag_chunks_opt` を作る）は任意・旧方式。ルールブックには通常不要

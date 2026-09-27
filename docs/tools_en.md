@@ -162,8 +162,6 @@ Process PIDs are written to `.pids`. `Stop-Omni.ps1` uses both this file and liv
 
 ### Legacy Scripts
 
-`start.sh` / `stop.sh` belong to the old setup (which launched llama-server directly). They are deprecated and will be removed.
-
 ---
 
 ## 3. Stop-Omni.ps1
@@ -230,7 +228,7 @@ Then run `embed_chunks.py` to create the embeddings.
 
 - `## ページ N` marks a PDF page. One PDF page holds a two-page spread of the book; its book pages are `2N-4` and `2N-3`
 - The table of contents (PDF pages 3–4) is read to map book pages to part / chapter / item
-- Text is split at headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters are split at 「。」; tables are split by rows every 450 characters with the header row repeated)
+- Text is split at headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters are split at 「。」; tables are split by rows every 900 characters with the header row repeated)
 - Ruby readings in the form 「漢字（かな）」 are removed, and full-width alphanumerics become half-width
 - Left out: page-number-only lines, table-of-contents leader lines, illustration credits, ©GROUP SNE lines, checkbox rows, page layout elements (sidebars, navigation, footers, ability charts, etc.), blank form tables (half or more of the body rows empty or holding only the first-column label), the sample characters' filled sheets (their explanatory prose is kept), and the index / designer's notes / staff list chapters
 - Runs of short headed entries (glossary style) are merged into one chunk with `【見出し】` labels. A short trailing piece is attached to the previous chunk and a short intro to the next. Identical text is deduplicated
@@ -360,7 +358,7 @@ uv run ai-agents/embed_chunks.py [options]
 1. With `--reembed-all`, set every `embedding` in `rag_chunks` and `rag_chunks_opt` back to NULL
 2. Fetch rows `WHERE embedding IS NULL` from each table, `--batch` at a time
 3. POST each row's text to `{embed_url}/v1/embeddings` as `{"model": <embed-model-id>, "input": <text>}`. For `rag_chunks`, when `section` is set the text is the section, a newline, then the body (the same as the orchestrator's `rag.EmbedInput`); for `rag_chunks_opt` it is the body only
-   - If the embedding server rejects the input as too large (mlx-serve's bge-m3-q8 takes up to 512 tokens; number-heavy tables can exceed it even when short), the end of the text is cut off and the request retried
+   - If the embedding server rejects the input as too large (mlx-serve's bge-m3-q8 takes up to 2048 tokens per input; normal chunks fit, so this is a safety net), the end of the text is cut off and the request retried
 4. Store the returned vector (float32 array) as a BLOB in the `embedding` column, committing every `--batch` rows
 5. Repeat until no pending rows remain (rows that fail stay NULL and a warning is printed)
 

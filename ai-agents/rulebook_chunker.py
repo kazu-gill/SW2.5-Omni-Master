@@ -18,8 +18,9 @@ from dataclasses import dataclass
 
 TARGET_CHARS = 600  # これを超えたら次の区切りでチャンクを閉じる
 MAX_CHARS = 900  # 1 段落がこれを超えたら分割する
-# 表は数字が多くトークンが増えやすい。埋め込みの上限 (mlx-serve bge-m3 は 512 トークン) に収まるよう小さく切る
-MAX_TABLE_CHARS = 450
+# 表は行単位で分ける。数字が多くトークンが増えやすいので、埋め込み (mlx-serve bge-m3、
+# 1 入力 2048 トークンまで) に収まる大きさにする
+MAX_TABLE_CHARS = 900
 MIN_BODY_CHARS = 40  # 見出しを除いた本文がこれ未満のチャンクは捨てる
 # 小見出しでチャンクを閉じるのは、ここまで溜まってから (用語集のような「見出し + 1 行」の連続をまとめる)
 MIN_CLOSE_CHARS = 250
