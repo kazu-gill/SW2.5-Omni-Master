@@ -62,3 +62,7 @@ ai-agents/.venv/
 # ── 大容量 PDF 仕様書・テストレポート ────────────────────────────────────────
 *.pdf
 *.PDF
+
+# ── NPC ペルソナ（個人データ。サンプルの example_gard.yaml のみ管理） ─────────
+data/personas/*
+!data/personas/example_gard.yaml
