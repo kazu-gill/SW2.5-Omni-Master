@@ -12,6 +12,7 @@ logs/*
 data/omni.db
 data/omni.db-shm
 data/omni.db-wal
+data/backup/
 
 # ── LLM モデルファイル（巨大バイナリ） ───────────────────────────────────────
 *.gguf

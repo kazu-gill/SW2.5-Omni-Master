@@ -14,12 +14,37 @@ import argparse
 import sqlite3
 import struct
 import sys
+import urllib.error
 from pathlib import Path
 
+from build_rulebook import ensure_columns
 from mlx_client import DEFAULT_EMBED_MODEL_ID, DEFAULT_EMBED_URL, embed, ping
 
-# (テーブル, ベクトル化するテキストの列)
-TABLES = [("rag_chunks", "text"), ("rag_chunks_opt", "text")]
+# (テーブル, ベクトル化するテキストを返す SQL 式)
+# rag_chunks は「部 > 章 > 見出し」+ 改行 + 本文を埋め込む (Go の rag.EmbedInput と同じ)
+TABLES = [
+    (
+        "rag_chunks",
+        "CASE WHEN section != '' THEN section || char(10) || text ELSE text END",
+    ),
+    ("rag_chunks_opt", "text"),
+]
+
+
+def embed_fitting(url: str, model_id: str, text: str) -> list[float]:
+    """埋め込む。サーバの入力上限 (バッチサイズ) を超えたら、末尾を削って再試行する。
+
+    mlx-serve の bge-m3 プロファイルは 512 トークンまで。数字の多い表などは
+    文字数が少なくても超えることがある。先頭 (見出しと本文の冒頭) が残れば検索には足りる。
+    """
+    for _ in range(4):
+        try:
+            return embed(url, model_id, text)
+        except urllib.error.HTTPError as e:
+            if e.code != 500 or b"too large" not in e.read():
+                raise
+            text = text[: int(len(text) * 0.75)]
+    return embed(url, model_id, text)
 
 
 def float32_to_blob(values: list[float]) -> bytes:
@@ -27,7 +52,12 @@ def float32_to_blob(values: list[float]) -> bytes:
 
 
 def embed_table(
-    con: sqlite3.Connection, table: str, url: str, model_id: str, batch: int
+    con: sqlite3.Connection,
+    table: str,
+    text_expr: str,
+    url: str,
+    model_id: str,
+    batch: int,
 ) -> tuple[int, int]:
     """table の embedding IS NULL の行をすべて処理し、(成功, 失敗) を返す。"""
     ok = failed = 0
@@ -37,14 +67,14 @@ def embed_table(
         placeholders = ",".join("?" * len(failed_ids))
         exclude = f"AND id NOT IN ({placeholders})" if failed_ids else ""
         rows = con.execute(
-            f"SELECT id, text FROM {table} WHERE embedding IS NULL {exclude} LIMIT ?",
+            f"SELECT id, {text_expr} FROM {table} WHERE embedding IS NULL {exclude} LIMIT ?",
             (*failed_ids, batch),
         ).fetchall()
         if not rows:
             return ok, failed
         for row_id, text in rows:
             try:
-                vec = embed(url, model_id, text)
+                vec = embed_fitting(url, model_id, text)
             except (OSError, ValueError, KeyError, IndexError) as e:
                 print(
                     f"  [WARN] {table} id={row_id} 埋め込み失敗: {e}", file=sys.stderr
@@ -70,8 +100,9 @@ def run(db_path: Path, url: str, model_id: str, batch: int, reembed_all: bool) -
                 print(f"[embed] {table}: {n} 件の埋め込みを消去")
             con.commit()
 
-        for table, _ in TABLES:
-            ok, failed = embed_table(con, table, url, model_id, batch)
+        ensure_columns(con)
+        for table, text_expr in TABLES:
+            ok, failed = embed_table(con, table, text_expr, url, model_id, batch)
             print(f"[embed] {table}: {ok} 件埋め込み完了 / 失敗 {failed} 件")
     finally:
         con.close()

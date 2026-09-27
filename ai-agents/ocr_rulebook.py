@@ -2,6 +2,11 @@
 """
 ocr_rulebook.py — PDF/Markdown → rag_chunks テーブルに挿入するスクリプト。
 
+※ ルールブック本体の取り込みには使わないこと。500 文字で機械的に切るため、
+  ページ番号だけの断片・目次・記入用シートがそのまま入り、ルビも残る。
+  ルールブックは build_rulebook.py で作り直す。このスクリプトは、短い
+  ハウスルール集や訂正集のテキストを追加するときだけ使う。
+
 使い方:
     uv run ocr_rulebook.py <file_path> [--source-type rulebook|correction|houserule] [--db <db_path>]
 
