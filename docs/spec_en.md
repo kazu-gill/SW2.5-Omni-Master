@@ -431,6 +431,24 @@ Every chat request (`/v1/chat/completions`) carries:
 
 Embeddings are requested from `/v1/embeddings` with `{"model": EMBED_MODEL_ID, "input": ...}`.
 
+#### One turn = one conversation (for prefix caching)
+
+All stages of a turn are sent as one growing conversation. Each stage's request is "the previous stage's request + its answer + this stage's instruction", so mlx-vlm's automatic prefix caching (APC) reuses the KV of everything before and only prefills the new instruction.
+
+```
+system    Fixed text shared by every stage and turn (tableSystemPrompt; no changing values such as HP)
+user      【参照ルール】【パーティ】【プレイヤー入力】【指示: GM】
+assistant GM narration
+user      【指示: NPC「A」】 … assistant  A's YAML
+user      【指示: NPC「B」】 … assistant  B's YAML   ← B sees A's action and picks a different one
+user      【指示: NPC「C」】 … assistant  C's YAML
+user      【指示: 数値計算担当】(Support rules + action list JSON)
+```
+
+- Only answers that passed validation stay in the conversation; re-think exchanges and skipped NPCs' output do not
+- A re-think enables thinking, which changes the start of the template, so it misses the cache (acceptable since re-thinks are rare)
+- With APC off in mlx-serve every stage prefills the whole conversation and turns get slower. The server checks `apc.enabled` in `/health` at startup and logs a warning when it is off. See `docs/mlx-serve-client-notes.md` for the mlx-serve settings
+
 ### 8.3 Additional TurnResult Fields
 
 | Field | Type | Description |

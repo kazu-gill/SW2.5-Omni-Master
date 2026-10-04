@@ -442,6 +442,24 @@ LLMで最適化済みのチャンク（RAG検索で優先使用）。
 
 埋め込みは `/v1/embeddings` に `{"model": EMBED_MODEL_ID, "input": ...}` を送ります。
 
+#### 1 ターン = 1 本の会話 (プレフィックスキャッシュ向け)
+
+1 ターンの全段は、伸びていく 1 本の会話として送ります。各段のリクエストは「前の段のリクエスト + その応答 + 自分の指示」になるため、mlx-vlm の自動プレフィックスキャッシュ (APC) が前の段までの KV を再利用し、新しい指示の分だけ prefill します。
+
+```
+system    全段・全ターン共通の固定文 (tableSystemPrompt。HP などの変わる値は入れない)
+user      【参照ルール】【パーティ】【プレイヤー入力】【指示: GM】
+assistant GM の描写
+user      【指示: NPC「A」】 … assistant  A の YAML
+user      【指示: NPC「B」】 … assistant  B の YAML   ← B は A の行動を見て重ならない行動を選ぶ
+user      【指示: NPC「C」】 … assistant  C の YAML
+user      【指示: 数値計算担当】(Support 用のルール + 行動リスト JSON)
+```
+
+- 会話に残すのは検証を通った応答だけ。再思考のやり取りや見送った NPC の出力は残さない
+- 再思考時は thinking を有効にするためテンプレートの先頭が変わり、キャッシュは効かない (再思考はまれなので許容)
+- mlx-serve 側で APC が無効だと、各段が会話全体を毎回 prefill するため遅くなる。起動時に `/health` の `apc.enabled` を確認し、無効なら警告をログに出す。必要な mlx-serve の設定は `docs/mlx-serve-client-notes.md` を参照
+
 ### 8.3 TurnResult の追加フィールド
 
 | フィールド | 型 | 説明 |

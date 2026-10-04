@@ -354,6 +354,7 @@ uv run pytest
 | [docs/tools_en.md](docs/tools_en.md) | Batch Tools Reference (English) |
 | [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
 | [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
+| [docs/verification-apc-20261005.md](docs/verification-apc-20261005.md) | 1 ターン 1 会話化とプレフィックスキャッシュ (APC) の計測 |
 | [docs/rulebook-rebuild-20260927.md](docs/rulebook-rebuild-20260927.md) | ルールブック RAG データの作り直し記録 |
 | [docs/ocr-suspects-20260927.md](docs/ocr-suspects-20260927.md) | ルールブック OCR 誤字の候補一覧 |
 

@@ -39,3 +39,21 @@ Omni-Master から mlx-serve (`/Users/kf/AI/MLX`) を使うときに確認した
 ## 埋め込み
 
 `POST /v1/embeddings` `{"model": "bge-m3-q8", "input": "<text>"}` → `data[0].embedding` (1024 次元)。
+
+## プレフィックスキャッシュ (APC) — 2026-10-05
+
+Omni-Master は 1 ターンの全段を 1 本の会話として送る (`docs/spec_ja.md` §8.2)。前の段のリクエストがそのまま次の段の先頭になるので、mlx-vlm の APC で prefill を省ける。ただし mlx-serve の既定では APC は無効。
+
+Gemma 4 はスライディングウィンドウ層を含むため、APC はチェックポイントの位置でしか KV を復元できない。チェックポイントは 2048 トークンごとと、プロンプト末尾 (`APC_CHECKPOINT_GUARD_TOKENS` 手前) に置かれる。生成プロンプトの末尾 `<|turn>model\n<|channel>thought\n<channel|>` は、次のリクエストで履歴としてレンダリングされると `<|turn>model\n<応答>` になり、末尾の 4 トークンが一致しない。既定のガード (1 トークン) ではチェックポイントが分岐点より後ろになり、2048 トークン単位でしかヒットしない。
+
+mlx-serve 側で必要な設定 (`gemma4-31b-it-heretic-4bit-mtp` の起動環境):
+
+| 環境変数 | 値 | 理由 |
+|---|---|---|
+| `APC_ENABLED` | `1` | APC を有効にする (既定 `0`) |
+| `APC_CHECKPOINT_GUARD_TOKENS` | `8` | 末尾チェックポイントを `<|turn>model\n` の手前に置き、次の段で一致させる |
+| `APC_CHECKPOINT_ENTRIES` | `4` | 常駐チェックポイント数 (既定 2)。段の切り替えで追い出されないように |
+
+実行中のサーバーなら `PATCH /v1/settings` に `{"apc_enabled": true, "apc_checkpoint_guard_tokens": 8, "apc_checkpoint_entries": 4}` でも変えられる (モデルの再ロードが走る)。
+
+計測結果は `docs/verification-apc-20261005.md`。
