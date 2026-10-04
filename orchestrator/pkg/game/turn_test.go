@@ -15,7 +15,7 @@ import (
 )
 
 // mockLLMServer answers every stage from one endpoint, choosing the reply by
-// the stage's system prompt (all stages share one model in production).
+// the stage's instruction, which is always the last message.
 func mockLLMServer(gm, npc, support string) *httptest.Server {
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/v1/embeddings" {
@@ -29,10 +29,10 @@ func mockLLMServer(gm, npc, support string) *httptest.Server {
 		}
 		json.NewDecoder(r.Body).Decode(&req)
 		reply := gm
-		switch system := req.Messages[0].Content; {
-		case strings.Contains(system, "あなたはNPC"):
+		switch instruction := req.Messages[len(req.Messages)-1].Content; {
+		case strings.Contains(instruction, "あなたはNPC"):
 			reply = npc
-		case strings.Contains(system, "数値計算担当"):
+		case strings.Contains(instruction, "数値計算担当"):
 			reply = support
 		}
 		json.NewEncoder(w).Encode(map[string]any{

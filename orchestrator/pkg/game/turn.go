@@ -14,7 +14,7 @@ import (
 )
 
 // Engine orchestrates a full TRPG turn. Every stage runs on the same chat
-// model, one call at a time.
+// model, one call at a time, as one growing conversation (see transcript).
 type Engine struct {
 	db         *sql.DB
 	llm        ChatModel
@@ -49,26 +49,28 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput) (*TurnResul
 		StageAttempts: map[string]int{},
 	}
 
+	sheets, err := db.GetNPCSheets(e.db, input.SessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get npc sheets: %w", err)
+	}
+	tx := newTranscript()
+
 	// 2. GM narration
-	gmNarration, err := e.gmNarrate(ctx, tr, input, e.rulesFor(ctx, input.Text, gmRuleCount))
+	gmNarration, err := e.gmNarrate(ctx, tr, tx, input, sheets, e.rulesFor(ctx, input.Text, gmRuleCount))
 	if err != nil {
 		return nil, fmt.Errorf("gm narration: %w", err)
 	}
 	tr.GMNarration = gmNarration
 
-	// 3. Load NPC sheets and let each NPC act in turn
-	sheets, err := db.GetNPCSheets(e.db, input.SessionID)
-	if err != nil {
-		return nil, fmt.Errorf("get npc sheets: %w", err)
-	}
-	npcActions, err := e.runNPCs(ctx, tr, gmNarration, sheets)
+	// 3. Let each NPC act in turn
+	npcActions, err := e.runNPCs(ctx, tr, tx, sheets)
 	if err != nil {
 		return nil, fmt.Errorf("npc actions: %w", err)
 	}
 	tr.NPCActions = npcActions
 
 	// 4. Support LM resource calculation
-	deltas, err := e.calculateResources(ctx, tr, npcActions, sheets)
+	deltas, err := e.calculateResources(ctx, tr, tx, npcActions, sheets)
 	if err != nil {
 		return nil, fmt.Errorf("resource calc: %w", err)
 	}
@@ -115,55 +117,69 @@ func (e *Engine) saveCheckpoint(ctx context.Context, sessionID int64, turn int) 
 	return db.SaveCheckpoint(e.db, sessionID, turn, string(snap))
 }
 
-func (e *Engine) gmNarrate(ctx context.Context, tr *TurnResult, input PlayerInput, ragCtx string) (string, error) {
-	systemPrompt := `あなたはソード・ワールド2.5のGMです。
-プレイヤーやシステムからの入力に対して、必ず日本語で応答してください。
+// gmNarrate opens the turn's transcript with the turn context (rules, party,
+// player input) and the GM's instruction. Later stages reuse this prefix.
+func (e *Engine) gmNarrate(ctx context.Context, tr *TurnResult, tx *transcript, input PlayerInput, sheets []db.NPCSheet, ragCtx string) (string, error) {
+	var b strings.Builder
+	if ragCtx != "" {
+		b.WriteString(ragCtx + "\n\n")
+	}
+	if len(sheets) > 0 {
+		b.WriteString("【パーティ】\n")
+		for _, s := range sheets {
+			fmt.Fprintf(&b, "- %s: HP=%d / MP=%d / レーン: %s\n", s.Name, s.HP, s.MP, positionToLane(s.PositionY))
+		}
+		b.WriteString("\n")
+	}
+	fmt.Fprintf(&b, "【プレイヤー入力】\n%s\n\n", input.Text)
+	b.WriteString(`【指示: GM】
+あなたはGMです。上のプレイヤー入力に対して応答してください。
 - 行動描写の場合: 情景・結果を2〜4文で描写する
 - 質問や直訴の場合: その内容に直接答える（NPCの紹介、ルール説明、状況確認など）
-- 必ず何かしら内容のある返答を返すこと。空の返答は禁止。`
-	if ragCtx != "" {
-		systemPrompt += "\n\n" + ragCtx
-	}
-	msgs := []llm.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: input.Text},
-	}
+- 必ず何かしら内容のある返答を返すこと。空の返答は禁止。
+- NPCの行動や数値はこの後の担当が決めるので、GMの地の文だけを書く。`)
+	instruction := b.String()
+
 	res, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
 		name:      "gm",
 		opts:      llm.CompletionOptions{Temperature: 0.8, MaxTokens: 2048},
 		retryHint: "GMとして情景・結果を日本語の地の文で描写し直してください。",
 		validate:  func(r llm.Result) error { return ValidateGMNarration(r) },
-	}, msgs)
+	}, tx.ask(instruction))
 	tr.StageAttempts["gm"] = attempts
-	return strings.TrimSpace(res.Text), err
+	if err != nil {
+		return "", err
+	}
+	tx.record(instruction, res.Text)
+	return strings.TrimSpace(res.Text), nil
 }
 
 // runNPCs asks each NPC for its action, one after another. An NPC whose
 // output never validates sits out this turn (recorded in tr.Warnings); a
 // transport error aborts the turn.
-func (e *Engine) runNPCs(ctx context.Context, tr *TurnResult, gmNarration string, sheets []db.NPCSheet) ([]NPCAction, error) {
+//
+// Each NPC sees the GM narration and the NPCs that already acted this turn
+// through the shared transcript.
+func (e *Engine) runNPCs(ctx context.Context, tr *TurnResult, tx *transcript, sheets []db.NPCSheet) ([]NPCAction, error) {
 	var actions []NPCAction
 	for _, sheet := range sheets {
 		currentLane := positionToLane(sheet.PositionY)
-		basePrompt := fmt.Sprintf(
-			"あなたはNPC「%s」です。現在HP=%d / MP=%d。現在のレーン: %s。\n"+
+		instruction := fmt.Sprintf(
+			"【指示: NPC「%s」】\n"+
+				"あなたはNPC「%s」です。現在HP=%d / MP=%d。現在のレーン: %s。\n"+
 				"戦闘は3レーン制（enemy=敵後衛 / front=フロントライン / party=味方後衛）です。\n"+
-				"状況を受け、以下のYAML形式のみで行動を出力してください。コードブロック・説明文は一切不要。\n"+
+				"GMの描写と、先に行動したNPCがいればその行動を受け、重ならない自分の行動を決めてください。\n"+
+				"以下のYAML形式のみで行動を出力してください。コードブロック・説明文は一切不要。\n"+
 				"制約: mp_costは0以上%d以下の整数、hp_deltaは%d以上0以下の整数。\n"+
 				"new_laneは「不意打ちで後衛が前線に引き出された」「前線崩壊で押し込まれた」など"+
 				"レーンが実際に変わる場合のみ enemy/front/party のいずれかを記入し、変化なければ省略。\n"+
 				"name: %s\naction: <行動>\ndialogue: <台詞>\nmp_cost: <消費MP整数>\nhp_delta: <HP変化整数>\nnew_lane: <省略可>",
-			sheet.Name, sheet.HP, sheet.MP, currentLane,
+			sheet.Name, sheet.Name, sheet.HP, sheet.MP, currentLane,
 			sheet.MP, -sheet.HP,
 			sheet.Name,
 		)
-		msgs := []llm.Message{
-			{Role: "system", Content: basePrompt},
-			{Role: "user", Content: gmNarration},
-		}
-
 		var action *NPCAction
-		_, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
+		res, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
 			name: "npc",
 			opts: llm.CompletionOptions{Temperature: 0.7, MaxTokens: 2048},
 			retryHint: fmt.Sprintf("name は %s、mp_costは0〜%d、hp_deltaは%d〜0の範囲でYAMLのみ再出力してください。",
@@ -176,7 +192,7 @@ func (e *Engine) runNPCs(ctx context.Context, tr *TurnResult, gmNarration string
 				action = a
 				return err
 			},
-		}, msgs)
+		}, tx.ask(instruction))
 		tr.StageAttempts["npc:"+sheet.Name] = attempts
 		if errors.Is(err, errRejected) {
 			tr.Warnings = append(tr.Warnings, fmt.Sprintf("NPC %s は行動できませんでした: %v", sheet.Name, err))
@@ -185,6 +201,7 @@ func (e *Engine) runNPCs(ctx context.Context, tr *TurnResult, gmNarration string
 		if err != nil {
 			return actions, fmt.Errorf("NPC %s: %w", sheet.Name, err)
 		}
+		tx.record(instruction, res.Text)
 		actions = append(actions, *action)
 	}
 	return actions, nil
@@ -209,14 +226,15 @@ func stripCodeBlock(s string) string {
 
 // calculateResources asks the Support stage to confirm each NPC's HP / MP
 // change. If its output never validates, the NPCs' own values are used.
-func (e *Engine) calculateResources(ctx context.Context, tr *TurnResult, actions []NPCAction, sheets []db.NPCSheet) ([]ResourceDelta, error) {
+func (e *Engine) calculateResources(ctx context.Context, tr *TurnResult, tx *transcript, actions []NPCAction, sheets []db.NPCSheet) ([]ResourceDelta, error) {
 	if len(actions) == 0 {
 		return nil, nil
 	}
 
 	actionsJSON, _ := json.Marshal(actions)
-	systemPrompt := `あなたはTRPGの数値計算担当です。
-NPC行動リストを受け取り、各NPCのHP変化とMP消費を確定してください。
+	instruction := `【指示: 数値計算担当】
+あなたはTRPGの数値計算担当です。
+このターンのNPC行動リストを受け取り、各NPCのHP変化とMP消費を確定してください。
 必ずJSON配列のみを返してください。説明文・コードブロック・改行以外の余分な文字は一切不要です。
 形式（厳守）: [{"npc_name":"名前","hp_delta":0,"mp_cost":0}]
 行動に攻撃がなければhp_deltaは0、魔法でなければmp_costは0。`
@@ -226,12 +244,9 @@ NPC行動リストを受け取り、各NPCのHP変化とMP消費を確定して�
 		fmt.Fprintf(&query, "%s %s\n", a.Action, a.Dice)
 	}
 	if rules := e.rulesFor(ctx, query.String(), supportRuleCount); rules != "" {
-		systemPrompt += "\n魔法の消費MPなど、参照ルールに記載がある値はそれに従ってください。\n\n" + rules
+		instruction += "\n魔法の消費MPなど、参照ルールに記載がある値はそれに従ってください。\n\n" + rules
 	}
-	msgs := []llm.Message{
-		{Role: "system", Content: systemPrompt},
-		{Role: "user", Content: string(actionsJSON)},
-	}
+	instruction += "\n\nNPC行動リスト:\n" + string(actionsJSON)
 
 	var deltas []ResourceDelta
 	_, attempts, err := e.runStage(ctx, tr.SessionID, tr.Turn, stage{
@@ -243,7 +258,7 @@ NPC行動リストを受け取り、各NPCのHP変化とMP消費を確定して�
 			deltas = d
 			return err
 		},
-	}, msgs)
+	}, tx.ask(instruction))
 	tr.StageAttempts["support"] = attempts
 	if errors.Is(err, errRejected) {
 		// Fallback: use values directly from NPCAction

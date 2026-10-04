@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -73,9 +74,20 @@ func checkMlxServe(baseURL, modelID string) {
 	client := &http.Client{Timeout: 3 * time.Second}
 	resp, err := client.Get(baseURL + "/health")
 	if err == nil {
+		var health struct {
+			APC *struct {
+				Enabled bool `json:"enabled"`
+			} `json:"apc"` // mlx-vlm only
+		}
+		_ = json.NewDecoder(resp.Body).Decode(&health)
 		resp.Body.Close()
 		if resp.StatusCode == http.StatusOK {
 			log.Printf("mlx-serve %s: ready (%s)", modelID, baseURL)
+			// A turn's stages share one growing prompt; without the prefix
+			// cache every stage re-prefills it from the start.
+			if health.APC != nil && !health.APC.Enabled {
+				log.Printf("warn: mlx-serve %s has the prefix cache (APC) off; turns will be slower", modelID)
+			}
 			return
 		}
 		err = fmt.Errorf("status %d", resp.StatusCode)

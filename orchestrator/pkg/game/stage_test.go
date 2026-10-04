@@ -166,7 +166,7 @@ func TestProcessTurnCallsStagesSerially(t *testing.T) {
 	if len(m.calls) != 4 {
 		t.Fatalf("calls = %d, want 4 (GM, NPC A, NPC B, Support)", len(m.calls))
 	}
-	if !strings.Contains(m.calls[1].msgs[0].Content, "「A」") || !strings.Contains(m.calls[2].msgs[0].Content, "「B」") {
+	if !strings.Contains(lastContent(m.calls[1].msgs), "「A」") || !strings.Contains(lastContent(m.calls[2].msgs), "「B」") {
 		t.Error("NPC stages should run in sheet order A then B")
 	}
 	if len(res.NPCActions) != 2 || len(res.Deltas) != 2 {
@@ -254,9 +254,10 @@ func TestProcessTurnGivesRulesToGMAndSupport(t *testing.T) {
 	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: session.ID, Turn: 1, Text: "魔法で攻撃"}); err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
-	gmSystem := m.calls[0].msgs[0].Content
-	supportSystem := m.calls[2].msgs[0].Content
-	for name, prompt := range map[string]string{"GM": gmSystem, "Support": supportSystem} {
+	// Each stage's rules are in its own instruction, the last message.
+	gmPrompt := lastContent(m.calls[0].msgs)
+	supportPrompt := lastContent(m.calls[2].msgs)
+	for name, prompt := range map[string]string{"GM": gmPrompt, "Support": supportPrompt} {
 		if !strings.Contains(prompt, "[第三部 データ > 魔法データ > 真語魔法データ p.248-249] 【エネルギー・ボルト】消費MP5") {
 			t.Errorf("%s prompt lacks the rule: %q", name, prompt)
 		}
@@ -264,4 +265,84 @@ func TestProcessTurnGivesRulesToGMAndSupport(t *testing.T) {
 			t.Errorf("%s prompt should have exactly one rules header: %q", name, prompt)
 		}
 	}
+}
+
+func lastContent(msgs []llm.Message) string { return msgs[len(msgs)-1].Content }
+
+// Every stage of a turn must extend the previous stage's request token for
+// token, so mlx-vlm's prefix cache only has to prefill the new instruction.
+func TestProcessTurnStagesShareOnePrefix(t *testing.T) {
+	bad := llm.Result{Text: "name: B\naction: 攻撃\ndialogue: x\nmp_cost: 99", FinishReason: "stop"}
+	e, m, sid := setupSerialEngine(t, []llm.Result{
+		{Text: "GMの描写。", FinishReason: "stop"},
+		{Text: npcYAML("A"), FinishReason: "stop"},
+		bad, bad, bad,
+		{Text: npcYAML("C"), FinishReason: "stop"},
+		{Text: `[{"npc_name":"A","hp_delta":-5,"mp_cost":3},{"npc_name":"C","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
+	}, "A", "B", "C")
+
+	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}); err != nil {
+		t.Fatalf("ProcessTurn: %v", err)
+	}
+	// First attempts only: GM, NPC A, NPC B, NPC C, Support.
+	first := []scriptedCall{m.calls[0], m.calls[1], m.calls[2], m.calls[5], m.calls[6]}
+	for i := 1; i < len(first); i++ {
+		prev, cur := first[i-1].msgs, first[i].msgs
+		// The previous request minus its own instruction is a prefix of this one.
+		if !hasPrefix(cur, prev[:len(prev)-1]) {
+			t.Fatalf("call %d does not extend call %d:\nprev=%+v\ncur=%+v", i, i-1, prev, cur)
+		}
+	}
+	if first[0].msgs[0].Role != "system" {
+		t.Error("the shared system prompt should come first")
+	}
+	// A's accepted answer is visible to C and Support; B's rejected ones are not.
+	for _, c := range first[3:] {
+		var joined strings.Builder
+		for _, msg := range c.msgs {
+			joined.WriteString(msg.Content)
+		}
+		if !strings.Contains(joined.String(), npcYAML("A")) {
+			t.Error("later stages should see NPC A's action")
+		}
+		if strings.Contains(joined.String(), "mp_cost: 99") {
+			t.Error("a rejected NPC answer must not enter the shared transcript")
+		}
+	}
+	// The retry of B works on its own copy and leaves the transcript intact.
+	if got := m.calls[3].msgs; len(got) != len(m.calls[2].msgs)+2 {
+		t.Errorf("retry of B has %d messages, want %d", len(got), len(m.calls[2].msgs)+2)
+	}
+}
+
+func TestStageSystemPromptIsStable(t *testing.T) {
+	e, m, sid := setupSerialEngine(t, []llm.Result{
+		{Text: "GMの描写1。", FinishReason: "stop"},
+		{Text: npcYAML("A"), FinishReason: "stop"},
+		{Text: `[{"npc_name":"A","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
+		{Text: "GMの描写2。", FinishReason: "stop"},
+		{Text: npcYAML("A"), FinishReason: "stop"},
+		{Text: `[{"npc_name":"A","hp_delta":0,"mp_cost":0}]`, FinishReason: "stop"},
+	}, "A")
+	for turn := 1; turn <= 2; turn++ {
+		if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: turn, Text: "進む"}); err != nil {
+			t.Fatalf("turn %d: %v", turn, err)
+		}
+	}
+	// HP / MP changed between turns, but the system prompt must not.
+	if m.calls[0].msgs[0] != m.calls[3].msgs[0] {
+		t.Errorf("system prompt changed between turns:\n%q\n%q", m.calls[0].msgs[0].Content, m.calls[3].msgs[0].Content)
+	}
+}
+
+func hasPrefix(msgs, prefix []llm.Message) bool {
+	if len(prefix) > len(msgs) {
+		return false
+	}
+	for i := range prefix {
+		if msgs[i] != prefix[i] {
+			return false
+		}
+	}
+	return true
 }
