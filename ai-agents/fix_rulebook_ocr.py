@@ -20,6 +20,7 @@ import argparse
 import re
 import shutil
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -32,9 +33,30 @@ DEFAULT_MD = ROOT / "data" / "rulebook" / "swordworld2.5_rulebook1.md"
 class Fix:
     note: str
     pattern: str
-    replacement: str
+    replacement: str | Callable[[re.Match], str]
     count: int  # 原本での件数
 
+
+# ローマ数字の判定: 直前が日本語 (かな・カナ・漢字) で、直後が英字でない
+_JA_BEFORE = r"(?<=[ぁ-ゖァ-ヶー一-龥々])"
+_NOT_LATIN = r"(?![A-Za-z])"
+
+# 中黒あり・なしの両方が出てくる語 (中黒付きの形)。中黒を取って揃える
+_DOTTED_PAIRS = (
+    "ア・ルフレイム",
+    "アルフ・レイム",
+    "ターゲット・サイト",
+    "ファイア・ボール",
+    "ウェポン・マスター",
+    "クイック・ローダー",
+    "クリエイト・ウェポン",
+    "ゲーム・データ",
+    "リープ・スラッシュ",
+    "アース・シールド",
+    "マナ・アブソーブ",
+    "オート・モビル",
+    "ディスガイズ・セット",
+)
 
 # 項目名「穢れ」の化け (魔物データ・サンプルキャラクターのシート)
 _LABEL = r"(?=\s*[:：])"
@@ -81,6 +103,33 @@ FIXES = [
         r"駆動（くどう）体（たい）",
         "発動（はつどう）体（たい）",
         1,
+    ),
+    # ── 表記の揺れ (B) ──────────────────────────────────────────────────────
+    # ローマ数字は全角 Ⅰ/Ⅱ/Ⅲ に揃える (半角 I や前の空白は OCR 由来)。長いものから置換する
+    Fix("Ⅲ ← III", _JA_BEFORE + r"\s?III" + _NOT_LATIN, "Ⅲ", 1),
+    Fix("Ⅱ ← II", _JA_BEFORE + r"\s?II" + _NOT_LATIN, "Ⅱ", 1),
+    Fix("Ⅰ ← I (特技名・書名)", _JA_BEFORE + r"\s?I" + _NOT_LATIN, "Ⅰ", 43),
+    Fix("Ⅰ ← 1 (《かばう1》)", r"《かばう1》", "《かばうⅠ》", 1),
+    # 中黒は取る。中黒あり・なしの両方が出てくる語だけを対象にする
+    # (中黒付きしかない語には「ソード・ワールド」のような正式表記もあるため一律には外さない)
+    Fix(
+        "中黒を取る",
+        "|".join(_DOTTED_PAIRS),
+        lambda m: m.group(0).replace("・", ""),
+        13,
+    ),
+    Fix(
+        "剣の加護の後のスラッシュを全角に",
+        r"(剣(?:（[ぁ-ゖ]+）)?の加護(?:（[ぁ-ゖ]+）)?)/",
+        r"\1／",
+        4,
+    ),
+    Fix("長音 ← マイナス記号 (セージ・フェンサー)", r"(?<=セ|サ)−(?=ジ|\s|$)", "ー", 3),
+    Fix(
+        "剣のかけら ← 剣の欠けら",
+        r"《剣（けん）の欠（か）けら》",
+        "《剣（けん）のかけら》",
+        2,
     ),
 ]
 
