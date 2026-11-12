@@ -122,6 +122,36 @@ func (h *Handler) wantsImage(turn int) bool {
 // makeSceneImage draws the turn's scene through the MLX image studio, saves
 // it with the session and attaches it to the turn. Failures only log: the
 // game goes on without a picture.
+// sceneRequest is what the studio is asked to draw. One turn's narration
+// often leaves the place unsaid (live run 2026-11-13: a fight in a mine shaft
+// came out in a forest), so the story so far and the previous scene go along.
+func (h *Handler) sceneRequest(sessionID int64, turn int, result *game.TurnResult) string {
+	var b strings.Builder
+	b.WriteString("ファンタジーTRPG（ソード・ワールド2.5）の一場面の挿絵を1枚。人物は後ろ姿か遠景にして、情景を中心に。場所と状況は下の流れに合わせる。\n")
+	if summary, err := db.ListSummary(h.database, sessionID); err == nil && len(summary) > 0 {
+		if len(summary) > 4 {
+			summary = summary[len(summary)-4:]
+		}
+		b.WriteString("これまで: " + strings.Join(summary, " ") + "\n")
+	}
+	if prev, err := h.turnResult(sessionID, turn-1); err == nil && prev.GMNarration != "" {
+		b.WriteString("直前の場面: " + clip(prev.GMNarration, 300) + "\n")
+	}
+	if result.Input != "" {
+		b.WriteString("プレイヤーの行動: " + result.Input + "\n")
+	}
+	b.WriteString("この場面: " + result.GMNarration)
+	return b.String()
+}
+
+func clip(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n]) + "…"
+}
+
 func (h *Handler) makeSceneImage(sessionID int64, turn int, result *game.TurnResult) {
 	if !h.wantsImage(turn) {
 		return
@@ -131,8 +161,7 @@ func (h *Handler) makeSceneImage(sessionID int64, turn int, result *game.TurnRes
 	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Minute)
 	defer cancel()
 
-	request := "ファンタジーTRPG（ソード・ワールド2.5）の一場面の挿絵を1枚。人物は後ろ姿か遠景にして、情景を中心に。\n場面: " + result.GMNarration
-	img, err := h.images.Scene(ctx, request)
+	img, err := h.images.Scene(ctx, h.sceneRequest(sessionID, turn, result))
 	if err != nil {
 		log.Printf("[image] session %d turn %d: %v", sessionID, turn, err)
 		ev.Stage(game.StageEvent{Turn: turn, Stage: "image", Label: "挿絵", Status: game.StageFailed, Attempt: 1, Message: err.Error()})

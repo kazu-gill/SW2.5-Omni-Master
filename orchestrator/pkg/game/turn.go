@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"regexp"
 	"strings"
 	"time"
 
@@ -225,7 +226,7 @@ func (r *turnRun) gm(ctx context.Context, input PlayerInput, sheets []db.NPCShee
 		opts:      llm.CompletionOptions{Temperature: 0.8, MaxTokens: 2048},
 		retryHint: "GMとして情景・結果を日本語の地の文で描写し直してください。",
 		validate: func(res llm.Result) error {
-			narration, specs = extractGMChecks(res.Text)
+			narration, specs = extractGMChecks(stripSpeakerLabel(res.Text))
 			if input.Mode == ModeGM {
 				specs = nil
 			}
@@ -279,9 +280,6 @@ func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, 
 				if err == nil {
 					err = ValidateNPCActionFor(a, sheet)
 				}
-				if err == nil && a.Check != "" {
-					_, _, _, err = parseNPCCheck(a.Check)
-				}
 				action = a
 				return err
 			},
@@ -296,13 +294,26 @@ func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, 
 			return actions, fmt.Errorf("NPC %s: %w", sheet.Name, err)
 		}
 		r.tx.record(instruction, res.Text)
+		// A check the code cannot read is not worth re-running the NPC for:
+		// the action stands, the check is not rolled, and the player is told.
 		if action.Check != "" {
-			kind, base, target, _ := parseNPCCheck(action.Check)
-			r.roll(sheet.Name, kind, base, target)
+			if kind, base, target, err := parseCheck(action.Check); err == nil {
+				r.roll(sheet.Name, kind, base, target)
+			} else {
+				r.tr.Warnings = append(r.tr.Warnings, fmt.Sprintf("%s の判定を振れませんでした: %v", sheet.Name, err))
+			}
 		}
 		actions = append(actions, *action)
 	}
 	return actions, nil
+}
+
+var speakerLabelRe = regexp.MustCompile(`^\s*(?:【GM】|GM\s*[:：])\s*`)
+
+// stripSpeakerLabel drops a leading "GM:" the model copies from the recaps
+// of earlier turns.
+func stripSpeakerLabel(s string) string {
+	return speakerLabelRe.ReplaceAllString(s, "")
 }
 
 // stripCodeBlock removes markdown code fences (```yaml ... ``` or ``` ... ```) from LLM output.

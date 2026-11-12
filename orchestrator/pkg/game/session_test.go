@@ -58,13 +58,14 @@ func TestContextCarriesPersonaQuestPCAndRecentTurns(t *testing.T) {
 		b, _ := json.Marshal(TurnResult{Turn: turn, Mode: ModeAction, Input: input, GMNarration: "描写" + input})
 		_ = db.SaveTurnResult(e.db, s.ID, turn, string(b))
 	}
+	_ = db.AddSummary(e.db, s.ID, 1, []string{"ギルは村を出た。"})
 
 	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: s.ID, Turn: 4, Text: "質問", Mode: ModeGM}, nil); err != nil {
 		t.Fatal(err)
 	}
 	msgs := m.calls[0].msgs
 	system := msgs[0].Content
-	for _, want := range []string{quests[0].Title, "【PC（プレイヤーキャラクター）】ギル", "フェンサー3", "■ガルド（ドワーフ）", "口調: 短文・体言止め。", "降伏した敵に止めを刺さない"} {
+	for _, want := range []string{"ギルは村を出た。", quests[0].Title, "【PC（プレイヤーキャラクター）】ギル", "フェンサー3", "■ガルド（ドワーフ）", "口調: 短文・体言止め。", "降伏した敵に止めを刺さない"} {
 		if !strings.Contains(system, want) {
 			t.Errorf("system prompt lacks %q:\n%s", want, system)
 		}
@@ -75,7 +76,7 @@ func TestContextCarriesPersonaQuestPCAndRecentTurns(t *testing.T) {
 	}
 	joined := strings.Join(all, "\n")
 	if strings.Contains(joined, "一つ目") || !strings.Contains(joined, "二つ目") || !strings.Contains(joined, "描写三つ目") {
-		t.Errorf("only the last %d turns should be sent:\n%s", recentTurns, joined)
+		t.Errorf("only the turns after the summary should be sent:\n%s", joined)
 	}
 }
 
@@ -126,16 +127,24 @@ func TestChecksAreRolledByCodeAndPassedOn(t *testing.T) {
 	}
 }
 
-func TestNPCCheckMustBeWellFormed(t *testing.T) {
+// An NPC check the code cannot read used to send the NPC back for a re-think;
+// in the live run Gemma kept writing the same form three times and the NPC
+// sat out. Now the action stands and only the check is dropped, with a warning.
+func TestUnreadableNPCCheckKeepsTheAction(t *testing.T) {
 	e, _, sid := setupSerialEngine(t, []llm.Result{
-		{Text: "GMの描写。", FinishReason: "stop"},
+		{Text: "GM: GMの描写。", FinishReason: "stop"},
 		{Text: "name: A\naction: 斬る\ndialogue: x\ncheck: 命中力判定で攻撃", FinishReason: "stop"},
-		{Text: npcYAML("A"), FinishReason: "stop"},
 		{Text: `[{"npc_name":"A","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
 	}, "A")
 	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}, nil)
-	if err != nil || res.StageAttempts["npc:A"] != 2 {
-		t.Fatalf("attempts=%v err=%v", res.StageAttempts, err)
+	if err != nil || res.StageAttempts["npc:A"] != 1 || len(res.NPCActions) != 1 || len(res.Checks) != 0 {
+		t.Fatalf("attempts=%v actions=%v checks=%v err=%v", res.StageAttempts, res.NPCActions, res.Checks, err)
+	}
+	if len(res.Warnings) != 1 || !strings.Contains(res.Warnings[0], "判定を振れませんでした") {
+		t.Errorf("warnings = %v", res.Warnings)
+	}
+	if res.GMNarration != "GMの描写。" {
+		t.Errorf("the copied speaker label should be stripped: %q", res.GMNarration)
 	}
 }
 

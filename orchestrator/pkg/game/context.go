@@ -11,9 +11,11 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// recentTurns is how many finished turns are sent word for word. Older turns
-// reach the model only through the session summary, so a long session costs
-// the same per turn as a short one (the approach the MLX chat settled on).
+// recentTurns is how many finished turns stay out of the summary. Every turn
+// not yet summarized is sent word for word: between summaries that is
+// recentTurns to recentTurns+summaryEvery-1 turns. Older turns reach the
+// model only through the session summary, so a long session costs about the
+// same per turn as a short one (the approach the MLX chat settled on).
 const recentTurns = 2
 
 // tableSystemPrompt opens every request. With the session's fixed context
@@ -250,8 +252,14 @@ func personaBlock(s db.NPCSheet) string {
 	if skills, ok := p["skills"].([]any); ok && len(skills) > 0 {
 		var names []string
 		for _, sk := range skills {
+			// The description goes along: without it the model makes up
+			// what a feat does when the player asks.
 			if m, ok := sk.(map[string]any); ok && str(m["name"]) != "" {
-				names = append(names, str(m["name"]))
+				name := str(m["name"])
+				if d := str(m["description"]); d != "" {
+					name += "（" + d + "）"
+				}
+				names = append(names, name)
 			}
 		}
 		if len(names) > 0 {
@@ -286,20 +294,25 @@ func oneLine(s string) string {
 	return strings.Join(strings.Fields(s), " ")
 }
 
-// recentTurnMessages returns the last finished turns as a player message and
-// a recap answer each, oldest first.
+// recentTurnMessages returns the finished turns the summary does not cover
+// yet as a player message and a recap answer each, oldest first.
 func (e *Engine) recentTurnMessages(sessionID int64) ([]llm.Message, error) {
 	results, err := db.ListTurnResults(e.db, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if len(results) > recentTurns {
-		results = results[len(results)-recentTurns:]
+	upto, err := db.SummarizedUpto(e.db, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	// A summary that keeps failing must not let the request grow without end.
+	if limit := recentTurns + summaryEvery; len(results) > limit {
+		results = results[len(results)-limit:]
 	}
 	var msgs []llm.Message
 	for _, raw := range results {
 		var tr TurnResult
-		if json.Unmarshal([]byte(raw), &tr) != nil || tr.Input == "" {
+		if json.Unmarshal([]byte(raw), &tr) != nil || tr.Input == "" || tr.Turn <= upto {
 			continue
 		}
 		msgs = append(msgs,

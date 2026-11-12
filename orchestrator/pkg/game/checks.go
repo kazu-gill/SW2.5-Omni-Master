@@ -57,13 +57,21 @@ func rollCheck(who, kind string, base, target int, d6 func() int) Check {
 	return c
 }
 
-var npcCheckRe = regexp.MustCompile(`^\s*(.+?)\s*基準値\s*[:：]?\s*([+-]?\d+)\s*目標値\s*[:：]?\s*(\d+)\s*$`)
+// Gemma often drops the 基準値/目標値 labels ("魔物知識 10 12") or uses
+// slashes ("命中力判定/5/12"), so the labels are optional and the separator
+// may be a space or a slash. Full-width digits and signs are normalized first.
+var checkRe = regexp.MustCompile(`^\s*(.+?)\s*[/／]?\s*(?:基準値)?\s*[:：]?\s*([+-]?\d+)\s*[/／]?\s*(?:目標値)?\s*[:：]?\s*(\d+)\s*$`)
 
-// parseNPCCheck reads an NPC's check field: "命中力判定 基準値5 目標値12".
-func parseNPCCheck(s string) (kind string, base, target int, err error) {
-	m := npcCheckRe.FindStringSubmatch(s)
-	if m == nil {
-		return "", 0, 0, fmt.Errorf("check は「判定名 基準値N 目標値M」の形で書いてください (%q)", s)
+var widthFold = strings.NewReplacer(
+	"０", "0", "１", "1", "２", "2", "３", "3", "４", "4",
+	"５", "5", "６", "6", "７", "7", "８", "8", "９", "9", "＋", "+", "－", "-", "−", "-",
+)
+
+// parseCheck reads "判定名 基準値N 目標値M"; the labels may be left out.
+func parseCheck(s string) (kind string, base, target int, err error) {
+	m := checkRe.FindStringSubmatch(widthFold.Replace(s))
+	if m == nil || strings.TrimSpace(m[1]) == "" {
+		return "", 0, 0, fmt.Errorf("判定 %q を読めませんでした (「判定名 基準値N 目標値M」の形で書く)", s)
 	}
 	base, _ = strconv.Atoi(m[2])
 	target, _ = strconv.Atoi(m[3])
@@ -75,21 +83,24 @@ type checkSpec struct {
 	base, target int
 }
 
-var gmCheckRe = regexp.MustCompile(`^\s*判定\s*[:：]\s*(.+?)\s*/\s*(.+?)\s*/\s*基準値\s*([+-]?\d+)\s*/\s*目標値\s*(\d+)\s*$`)
+var gmCheckLineRe = regexp.MustCompile(`^\s*判定\s*[:：]\s*(.+?)\s*[/／]\s*(.+)$`)
 
 // extractGMChecks takes the "判定: 誰/判定名/基準値N/目標値M" lines out of
-// the GM's narration and returns the narration without them.
+// the GM's narration and returns the narration without them. A 判定 line
+// without numbers (e.g. "自動成功") is dropped from the narration but not
+// rolled.
 func extractGMChecks(text string) (string, []checkSpec) {
 	var keep []string
 	var specs []checkSpec
 	for _, line := range strings.Split(text, "\n") {
-		if m := gmCheckRe.FindStringSubmatch(line); m != nil {
-			base, _ := strconv.Atoi(m[3])
-			target, _ := strconv.Atoi(m[4])
-			specs = append(specs, checkSpec{who: m[1], kind: m[2], base: base, target: target})
+		m := gmCheckLineRe.FindStringSubmatch(line)
+		if m == nil {
+			keep = append(keep, line)
 			continue
 		}
-		keep = append(keep, line)
+		if kind, base, target, err := parseCheck(m[2]); err == nil {
+			specs = append(specs, checkSpec{who: m[1], kind: kind, base: base, target: target})
+		}
 	}
 	return strings.TrimSpace(strings.Join(keep, "\n")), specs
 }

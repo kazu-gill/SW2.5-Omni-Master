@@ -7,10 +7,12 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
+	"github.com/kf/sw25-omni-master/pkg/game"
 	"nhooyr.io/websocket"
 	"nhooyr.io/websocket/wsjson"
 )
@@ -194,5 +196,24 @@ func TestNPCLimitAndErrorsAreJSON(t *testing.T) {
 	}
 	if resp.StatusCode != http.StatusNoContent || gard == nil || gard.HPMax != 38 {
 		t.Errorf("adding the 3rd NPC: status=%d sheet=%+v", resp.StatusCode, gard)
+	}
+}
+
+func TestSceneRequestCarriesTheStorySoFar(t *testing.T) {
+	h, _, sid := setupHandler(t)
+	for turn, narr := range []string{"", "一行は坑道に入った。", "ゴブリンが飛び出してきた。"} {
+		if turn == 0 {
+			continue
+		}
+		b, _ := json.Marshal(game.TurnResult{Turn: turn, Input: "進む", GMNarration: narr})
+		_ = db.SaveTurnResult(h.database, sid, turn, string(b))
+	}
+	_ = db.AddSummary(h.database, sid, 1, []string{"ギルたちは鉱山の坑道へ向かった。"})
+
+	got := h.sceneRequest(sid, 2, &game.TurnResult{Turn: 2, Input: "斬りかかる", GMNarration: "ゴブリンが飛び出してきた。"})
+	for _, want := range []string{"これまで: ギルたちは鉱山の坑道へ向かった。", "直前の場面: 一行は坑道に入った。", "プレイヤーの行動: 斬りかかる", "この場面: ゴブリンが飛び出してきた。"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("request lacks %q:\n%s", want, got)
+		}
 	}
 }

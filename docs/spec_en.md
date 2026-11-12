@@ -16,7 +16,7 @@ The contract between the UI and the orchestrator (endpoints, WebSocket events, t
 |---------|-------------|
 | **Autonomous GM** | LLM acts as GM, generating situational narration and check requests for each player action |
 | **NPC Multi-Agent** | NPCs take turns on the same model, each following its persona (personality, speech, backstory, action rules). Every stage's output is validated and re-thought if invalid |
-| **Session Memory** | The LLM gets a fixed per-session prefix (table rules, accepted quest, PC, NPC personas), a running summary and the last 2 turns word for word |
+| **Session Memory** | The LLM gets a fixed per-session prefix (table rules, accepted quest, PC, NPC personas), a running summary and the turns not yet summarized (2–4) word for word |
 | **Checks** | The GM and NPCs only state the check, base value and target; the code rolls 2d6 |
 | **RAG Rule Lookup** | Imported rulebook is searched by embedding vector and by term reading, and injected into LLM prompts |
 | **Image Generation** | The MLX image studio (mlx-studio-web) draws a scene image every few turns |
@@ -414,7 +414,7 @@ Each LLM stage's output is validated. If it fails, only that stage is called aga
 | Stage | Rejected when | When retries run out |
 |-------|---------------|----------------------|
 | GM | Empty (after the check lines are taken out) / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn fails (rolled back to its start) |
-| NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` / `check` not in the form 「判定名 基準値N 目標値M」 | That NPC sits out the turn (recorded in `warnings`) |
+| NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` | That NPC sits out the turn (recorded in `warnings`) |
 | Support | Not a JSON array / not exactly one entry per acting NPC (unknown or duplicate names) / values out of range | The NPCs' own `hp_delta` / `mp_cost` are used (recorded in `warnings`) |
 
 Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`. When a re-think starts, a `stage` event with `status: retry` arrives and the UI discards that stage's text and receives it again.
@@ -476,10 +476,10 @@ Instead of starting a new conversation each turn, the session's story reaches th
 |------|---------|-------|
 | Fixed prefix | Table rules (roles take turns, the system rolls the dice, …), the accepted quest, a summary of the active PC sheet (race, classes, abilities, max HP/MP, gear, combat feats), the NPC personas | system message |
 | Summary | The `session_summaries` sentences, oldest first | end of the system message |
-| Recent turns | The last 2 turns word for word (player input; GM narration, NPC lines and actions, check results) | user / assistant messages after the system message |
+| Recent turns | The turns not yet in the summary, word for word: always the last 2, up to 4 just before a summary is written (player input; GM narration, NPC lines and actions, check results) | user / assistant messages after the system message |
 
 - The prefix is ordered from least to most likely to change (table rules → quest → PC → NPCs) so it stays the same across turns and mlx-vlm's APC can reuse it
-- NPC personas come from the sheet YAML: race, gender, age, classes, max HP/MP, `personality`'s `tone` / `speech_style` / `values` / `fears` / `quirks`, `backstory`, `action_rules`, `equipment` and `skills` names. Missing keys are skipped
+- NPC personas come from the sheet YAML: race, gender, age, classes, max HP/MP, `personality`'s `tone` / `speech_style` / `values` / `fears` / `quirks`, `backstory`, `action_rules`, `equipment` and `skills` names with their descriptions (without them the model makes up what a feat does when asked). Missing keys are skipped
 - Summary: after each finished turn, once 3 or more unsummarized turns older than the last 2 have piled up, a recorder stage (`stage: summary`) folds them into 3–6 sentences, each with an explicit subject, and appends them to `session_summaries`. The session stays busy during the summary (the next turn gets 409). A failed summary is retried after the next turn
 
 ### 8.5 Checks
@@ -488,6 +488,8 @@ Check outcomes are decided by code, not by the LLM (`pkg/game/checks.go`).
 
 - For an action that needs a roll, the GM ends its narration with `判定: 誰/判定名/基準値N/目標値M` lines (one per check). These lines are taken out of the narration and rolled. GM appeals roll nothing
 - An NPC asks for a roll with the optional YAML field `check: 判定名 基準値N 目標値M`
+- The 基準値 / 目標値 labels may be left out (`魔物知識 10 12` and `命中力判定/10/10` are read too), since Gemma often drops them. A 判定 line without numbers (such as `自動成功`) is removed from the narration and not rolled
+- When an NPC's `check` cannot be read, the action is kept, the check is not rolled, and a warning is recorded (no re-think)
 - The code rolls 2d6; dice + base ≥ target succeeds. A natural 12 always succeeds, a natural 2 always fails
 - Results are passed to later stages (NPCs, Support) as `【判定結果（システムが振ったサイコロ）】` and to the UI as `check` events, shown as dice chips. The next turn's GM narrates according to the recent turns' results
 
@@ -601,7 +603,7 @@ check: 命中力判定 基準値5 目標値12   # Only when the outcome depends 
 - Drawn asynchronously after the turn is finished (progress as `stage: image`). When done, an `image` event is sent and the image is attached to the turn's `image_url`, unless the turn was rewound meanwhile
 
 ### Image Retrieval Flow
-1. `POST /api/studio/infer` with a request built from the GM narration; poll the job until the composition is ready
+1. `POST /api/studio/infer` with a request built from the last 4 summary sentences, the previous scene, the player action and this turn's GM narration (one narration alone often leaves out the place); poll the job until the composition is ready
 2. `POST /api/studio/render`; poll the job until the image is ready (6 minutes in total at most)
 3. Save it as `IMAGES_DIR/sessions/<session id>/<turn>.<ext>`, served by `GET /api/sessions/{id}/images/{file}`
 
