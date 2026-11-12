@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/llm"
@@ -14,20 +15,86 @@ import (
 type Engine struct {
 	database *sql.DB
 	embedder *llm.Client
+
+	termsMu sync.Mutex
+	terms   *termIndex // built on first search; nil after rules change
 }
 
 func New(database *sql.DB, embedder *llm.Client) *Engine {
 	return &Engine{database: database, embedder: embedder}
 }
 
-// Search embeds the query via the LLM client, then retrieves the topK most
-// relevant RAG chunks ordered by cosine similarity (priority as tiebreaker).
+// maxTermHits caps how many results the term index may take over.
+const maxTermHits = 2
+
+// Search returns the topK rules for query: chunks that define a game term the
+// query names (by reading, see terms.go) come first, then the most similar
+// chunks by embedding (with the priority bonus).
 func (e *Engine) Search(ctx context.Context, query string, topK int) ([]db.RAGChunk, error) {
 	vec, err := e.embedder.Embed(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("rag.Search embed: %w", err)
 	}
-	return db.SearchRAGChunks(e.database, vec, topK)
+	found, err := db.SearchRAGChunks(e.database, vec, topK)
+	if err != nil {
+		return nil, err
+	}
+	matches := e.termIndex().match(query, min(maxTermHits, topK))
+	if len(matches) == 0 {
+		return found, nil
+	}
+	var out []db.RAGChunk
+	seen := map[int64]bool{}
+	for _, m := range matches {
+		if seen[m.chunkID] {
+			continue
+		}
+		c, err := db.GetRAGChunk(e.database, m.chunkID)
+		if err != nil || !c.Enabled {
+			continue
+		}
+		for _, f := range found {
+			if f.ID == c.ID {
+				c.Score = f.Score
+			}
+		}
+		c.MatchedTerm = m.name
+		seen[c.ID] = true
+		out = append(out, c)
+	}
+	for _, f := range found {
+		if len(out) == topK {
+			break
+		}
+		if !seen[f.ID] {
+			seen[f.ID] = true
+			out = append(out, f)
+		}
+	}
+	return out, nil
+}
+
+// termIndex returns the term index, building it from the enabled rules the
+// first time (about 0.3 s for the rulebook).
+func (e *Engine) termIndex() *termIndex {
+	e.termsMu.Lock()
+	defer e.termsMu.Unlock()
+	if e.terms == nil {
+		chunks, err := db.ListRAGChunks(e.database, "")
+		if err != nil {
+			return &termIndex{}
+		}
+		e.terms = buildTermIndex(chunks)
+	}
+	return e.terms
+}
+
+// InvalidateTerms makes the next search rebuild the term index (after a rule
+// is added, edited or deleted).
+func (e *Engine) InvalidateTerms() {
+	e.termsMu.Lock()
+	e.terms = nil
+	e.termsMu.Unlock()
 }
 
 // EmbedInput is the text that gets embedded for a chunk: its section path
@@ -85,6 +152,7 @@ func (e *Engine) Reembed(ctx context.Context, id int64) error {
 	if err != nil {
 		return fmt.Errorf("rag.Reembed: %w", err)
 	}
+	e.InvalidateTerms()
 	return db.UpdateEmbedding(e.database, id, vec)
 }
 

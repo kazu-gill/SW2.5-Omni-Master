@@ -136,10 +136,6 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws", h.handleWebSocket)
 }
 
-
-
-
-
 func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
 		InsecureSkipVerify: true,
@@ -190,10 +186,6 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 }
-
-
-
-
 
 // handleNPCPosition updates a single NPC's lane for manual formation edits.
 // Body: {"session_id": 1, "name": "ガルド", "lane": "front"}
@@ -676,6 +668,9 @@ func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	if h.rag != nil {
+		defer h.rag.InvalidateTerms()
+	}
 	if err := db.DeleteRAGChunk(h.database, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -696,7 +691,6 @@ func (h *Handler) handleDeleteCheckpoint(w http.ResponseWriter, r *http.Request)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
 
 // ── Scenarios ────────────────────────────────────────────────────────────────
 
@@ -834,7 +828,6 @@ func (h *Handler) handleUpdateScenarioStatus(w http.ResponseWriter, r *http.Requ
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
-
 
 // send delivers a message to the clients watching sessionID. Every message
 // carries "session_id". A client too slow to keep up loses messages; it

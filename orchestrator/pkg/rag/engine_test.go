@@ -121,3 +121,23 @@ func TestBuildContextEmpty(t *testing.T) {
 		t.Errorf("expected empty string, got %q", got)
 	}
 }
+
+func TestSearchPutsTermDefinitionFirst(t *testing.T) {
+	engine, database := setupTest(t)
+	ctx := context.Background()
+	// The mock embeds every query to the same vector as "ルール本文テスト" only
+	// when the text matches; anything else embeds elsewhere, so similarity alone
+	// would never find the feat for this query.
+	_, _ = engine.IndexChunk(ctx, "rulebook", 0, "ルール本文テスト")
+	featID, _ := db.InsertRAGChunk(database, db.RAGChunk{
+		SourceType: "rulebook", Enabled: true, Text: "味方への攻撃を代わりに受ける。",
+		Section: "第三部 データ > 戦闘特技データ > 《かばうⅠ》", Embedding: []float32{0, 0, 1},
+	})
+	got, err := engine.Search(ctx, "盾で割り込んで後衛を庇う", 2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].ID != featID || got[0].MatchedTerm != "かばう" {
+		t.Errorf("got %+v", got)
+	}
+}
