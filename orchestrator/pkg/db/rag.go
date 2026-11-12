@@ -21,7 +21,14 @@ type RAGChunk struct {
 	Section     string // 部 > 章 > 見出し
 	PageFrom    int    // 本のページ。0 は不明
 	PageTo      int
+	Score       float64 // 検索時のみ: クエリとのコサイン類似度
+	MatchedTerm string  // 検索時のみ: 用語の完全一致で選ばれたときの用語
 }
+
+// priorityBonus is added to a chunk's similarity when ranking, so a house
+// rule (priority 20) or correction (10) beats a rulebook passage (0) that is
+// only slightly more similar, as the rules screen promises.
+const priorityBonus = 0.0025
 
 func nullablePage(p int) any {
 	if p == 0 {
@@ -200,7 +207,7 @@ func UpdateEmbedding(d *sql.DB, chunkID int64, embedding []float32) error {
 // SearchRAGChunks finds the topK most similar chunks to queryVec using cosine
 // similarity. Only enabled chunks are considered, and a chunk that an enabled
 // correction/houserule overrides (overrides_id) is left out so the fix wins.
-// Priority (20 > 10 > 0) is used as a tiebreaker at equal similarity.
+// Ranking adds a small bonus by priority (20 > 10 > 0) to the similarity.
 // When a rag_chunks_opt record exists for a chunk, its text and embedding are
 // used instead of the originals.
 func SearchRAGChunks(d *sql.DB, queryVec []float32, topK int) ([]RAGChunk, error) {
@@ -235,9 +242,8 @@ func SearchRAGChunks(d *sql.DB, queryVec []float32, topK int) ([]RAGChunk, error
 			return nil, err
 		}
 		c.Enabled = true
-		c.Embedding = blobToFloat32Slice(blob)
-		sim := cosineSimilarity(queryVec, c.Embedding)
-		candidates = append(candidates, scored{c, sim})
+		c.Score = cosineSimilarity(queryVec, blobToFloat32Slice(blob))
+		candidates = append(candidates, scored{c, c.Score + float64(c.Priority)*priorityBonus})
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -86,4 +87,20 @@ func ActivatePlayerCharacter(d *sql.DB, id int64) error {
 func DeactivatePlayerCharacter(d *sql.DB, id int64) error {
 	_, err := d.Exec(`UPDATE player_characters SET is_active = 0 WHERE id = ?`, id)
 	return err
+}
+
+// GetActivePlayerCharacter returns the PC in play, or nil when none is active.
+func GetActivePlayerCharacter(d *sql.DB) (*PlayerCharacter, error) {
+	var pc PlayerCharacter
+	err := d.QueryRow(
+		`SELECT id, name, json_blob, is_active, created_at, updated_at
+		 FROM player_characters WHERE is_active = 1 ORDER BY id LIMIT 1`).
+		Scan(&pc.ID, &pc.Name, &pc.JSONBlob, &pc.IsActive, &pc.CreatedAt, &pc.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &pc, nil
 }

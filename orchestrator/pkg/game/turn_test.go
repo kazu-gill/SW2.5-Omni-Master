@@ -2,45 +2,20 @@ package game
 
 import (
 	"context"
-	"encoding/json"
-	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/llm"
+	"github.com/kf/sw25-omni-master/pkg/llm/llmtest"
 	"github.com/kf/sw25-omni-master/pkg/rag"
 )
 
 // mockLLMServer answers every stage from one endpoint, choosing the reply by
 // the stage's instruction, which is always the last message.
 func mockLLMServer(gm, npc, support string) *httptest.Server {
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/v1/embeddings" {
-			json.NewEncoder(w).Encode(map[string]any{
-				"data": []map[string]any{{"embedding": []float32{1, 0, 0}}},
-			})
-			return
-		}
-		var req struct {
-			Messages []llm.Message `json:"messages"`
-		}
-		json.NewDecoder(r.Body).Decode(&req)
-		reply := gm
-		switch instruction := req.Messages[len(req.Messages)-1].Content; {
-		case strings.Contains(instruction, "あなたはNPC"):
-			reply = npc
-		case strings.Contains(instruction, "数値計算担当"):
-			reply = support
-		}
-		json.NewEncoder(w).Encode(map[string]any{
-			"choices": []map[string]any{
-				{"message": map[string]string{"role": "assistant", "content": reply}, "finish_reason": "stop"},
-			},
-		})
-	}))
+	return llmtest.NewServer(llmtest.ByStage(gm, npc, support))
 }
 
 func setupEngine(t *testing.T, npcReply string) (*Engine, int64) {
@@ -76,7 +51,7 @@ func TestProcessTurnBasic(t *testing.T) {
 		SessionID: sessionID,
 		Turn:      1,
 		Text:      "剣で攻撃する",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
@@ -97,7 +72,7 @@ func TestProcessTurnCheckpointSaved(t *testing.T) {
 		SessionID: sessionID,
 		Turn:      1,
 		Text:      "様子を見る",
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}

@@ -11,9 +11,11 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/game"
+	"github.com/kf/sw25-omni-master/pkg/images"
 	"github.com/kf/sw25-omni-master/pkg/rag"
 	"gopkg.in/yaml.v3"
 	"nhooyr.io/websocket"
@@ -21,9 +23,28 @@ import (
 )
 
 // wsClient wraps a WebSocket connection with a serialized write channel.
+// sessionID filters what it receives (0 = every session).
 type wsClient struct {
-	conn  *websocket.Conn
-	sendC chan any
+	conn      *websocket.Conn
+	sendC     chan any
+	sessionID int64
+}
+
+// Endpoint is an mlx-serve profile the orchestrator uses.
+type Endpoint struct {
+	URL     string `json:"url"`
+	ModelID string `json:"model_id"`
+}
+
+// Options configures a Handler.
+type Options struct {
+	PersonasDir string
+	TurnTimeout time.Duration
+	Images      *images.Client // nil: no scene images
+	ImageEvery  int
+	ImagesDir   string
+	LLM, Embed  Endpoint
+	APCTenant   string
 }
 
 // Handler holds shared state and serves all HTTP/WS routes.
@@ -31,31 +52,59 @@ type Handler struct {
 	database    *sql.DB
 	engine      *game.Engine
 	rag         *rag.Engine // embeds rules added or edited from the UI
-	comfy       *game.ComfyUIClient
 	personasDir string
+	turns       *turnRunner
+	turnTimeout time.Duration
+	images      *images.Client
+	imageEvery  int
+	imagesDir   string
+	llmEP       Endpoint
+	embedEP     Endpoint
+	apcTenant   string
 
 	mu      sync.RWMutex
 	clients map[*wsClient]struct{}
 }
 
-func New(database *sql.DB, engine *game.Engine, ragEngine *rag.Engine, comfy *game.ComfyUIClient, personasDir string) *Handler {
+func New(database *sql.DB, engine *game.Engine, ragEngine *rag.Engine, opts Options) *Handler {
+	if opts.TurnTimeout == 0 {
+		opts.TurnTimeout = 15 * time.Minute
+	}
+	if opts.ImageEvery == 0 {
+		opts.Images = nil
+	}
 	return &Handler{
 		database:    database,
 		engine:      engine,
 		rag:         ragEngine,
-		comfy:       comfy,
-		personasDir: personasDir,
+		personasDir: opts.PersonasDir,
+		turns:       newTurnRunner(),
+		turnTimeout: opts.TurnTimeout,
+		images:      opts.Images,
+		imageEvery:  opts.ImageEvery,
+		imagesDir:   opts.ImagesDir,
+		llmEP:       opts.LLM,
+		embedEP:     opts.Embed,
+		apcTenant:   opts.APCTenant,
 		clients:     make(map[*wsClient]struct{}),
 	}
 }
 
 // Routes registers all endpoints on the given mux.
 func (h *Handler) Routes(mux *http.ServeMux) {
-	mux.HandleFunc("POST /api/turn", h.handleTurn)
-	mux.HandleFunc("POST /api/gm-channel", h.handleGMChannel)
-	mux.HandleFunc("GET /api/session/{id}", h.handleGetSession)
-	mux.HandleFunc("GET /api/checkpoint/restore/{turn}", h.handleRestoreCheckpoint)
-	mux.HandleFunc("GET /api/comfy/status", h.handleComfyStatus)
+	mux.HandleFunc("GET /api/system", h.handleSystem)
+	// Sessions and turns
+	mux.HandleFunc("GET /api/sessions", h.handleListSessions)
+	mux.HandleFunc("POST /api/sessions", h.handleCreateSession)
+	mux.HandleFunc("GET /api/sessions/{id}", h.handleGetSession)
+	mux.HandleFunc("DELETE /api/sessions/{id}", h.handleDeleteSession)
+	mux.HandleFunc("POST /api/sessions/{id}/turn", h.handleSessionTurn)
+	mux.HandleFunc("POST /api/sessions/{id}/cancel", h.handleCancelTurn)
+	mux.HandleFunc("POST /api/sessions/{id}/redo", h.handleRedo)
+	mux.HandleFunc("POST /api/sessions/{id}/restore", h.handleRestore)
+	mux.HandleFunc("POST /api/sessions/{id}/quest", h.handleSessionQuest)
+	mux.HandleFunc("GET /api/sessions/{id}/images/{file}", h.handleSessionImage)
+	// Party
 	mux.HandleFunc("PATCH /api/npc-position", h.handleNPCPosition)
 	mux.HandleFunc("GET /api/personas", h.handleListPersonas)
 	mux.HandleFunc("POST /api/npc-sheet", h.handleAddNPCSheet)
@@ -70,13 +119,14 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/player-characters/{id}", h.handleDeletePC)
 	mux.HandleFunc("PATCH /api/player-characters/{id}/activate", h.handleActivatePC)
 	mux.HandleFunc("PATCH /api/player-characters/{id}/deactivate", h.handleDeactivatePC)
+	// Rules
 	mux.HandleFunc("GET /api/rules", h.handleListRules)
+	mux.HandleFunc("GET /api/rules/search", h.handleSearchRules)
 	mux.HandleFunc("POST /api/rules", h.handleCreateRule)
 	mux.HandleFunc("PATCH /api/rules/{id}", h.handleUpdateRule)
 	mux.HandleFunc("DELETE /api/rules/{id}", h.handleDeleteRule)
 	// DEV-mode endpoints
 	mux.HandleFunc("DELETE /api/checkpoint/{id}", h.handleDeleteCheckpoint)
-	mux.HandleFunc("DELETE /api/session-log/turn/{turn}", h.handleDeleteSessionLogTurn)
 	// Scenario batch endpoints
 	mux.HandleFunc("GET /api/scenarios", h.handleListScenarios)
 	mux.HandleFunc("GET /api/scenarios/{id}", h.handleGetScenario)
@@ -86,136 +136,9 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /ws", h.handleWebSocket)
 }
 
-func (h *Handler) handleTurn(w http.ResponseWriter, r *http.Request) {
-	var input game.PlayerInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
-		return
-	}
-	if input.SessionID == 0 || input.Text == "" {
-		http.Error(w, "session_id and text are required", http.StatusBadRequest)
-		return
-	}
 
-	result, err := h.engine.ProcessTurn(r.Context(), input)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
 
-	h.broadcast(result)
-	h.saveTurnResult(result)
-	go h.generateAndBroadcastImage(result.SessionID, result.Turn, result.GMNarration)
 
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
-func (h *Handler) handleGMChannel(w http.ResponseWriter, r *http.Request) {
-	var input game.PlayerInput
-	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
-		return
-	}
-	input.Text = "[GM直訴] " + input.Text
-
-	result, err := h.engine.ProcessTurn(r.Context(), input)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	h.broadcast(result)
-	h.saveTurnResult(result)
-	go h.generateAndBroadcastImage(result.SessionID, result.Turn, result.GMNarration)
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(result)
-}
-
-func (h *Handler) handleGetSession(w http.ResponseWriter, r *http.Request) {
-	idStr := strings.TrimPrefix(r.PathValue("id"), "")
-	id, err := strconv.ParseInt(idStr, 10, 64)
-	if err != nil {
-		http.Error(w, "invalid session id", http.StatusBadRequest)
-		return
-	}
-
-	session, err := db.GetSession(h.database, id)
-	if err != nil {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
-	sheets, err := db.GetNPCSheets(h.database, id)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	checkpoints, _ := db.ListCheckpoints(h.database, id)
-	turnJSONs, _ := db.ListTurnResults(h.database, id)
-
-	// Wrap raw JSON strings into a valid JSON array.
-	turnsArray := json.RawMessage("[]")
-	if len(turnJSONs) > 0 {
-		buf := []byte("[")
-		for i, s := range turnJSONs {
-			if i > 0 {
-				buf = append(buf, ',')
-			}
-			buf = append(buf, []byte(s)...)
-		}
-		buf = append(buf, ']')
-		turnsArray = buf
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]any{
-		"session":      session,
-		"npc_sheets":   sheets,
-		"checkpoints":  checkpoints,
-		"turn_results": turnsArray,
-	})
-}
-
-func (h *Handler) handleRestoreCheckpoint(w http.ResponseWriter, r *http.Request) {
-	turnStr := r.PathValue("turn")
-	turn, err := strconv.Atoi(turnStr)
-	if err != nil {
-		http.Error(w, "invalid turn", http.StatusBadRequest)
-		return
-	}
-	sessionID, err := strconv.ParseInt(r.URL.Query().Get("session_id"), 10, 64)
-	if err != nil {
-		http.Error(w, "session_id query param required", http.StatusBadRequest)
-		return
-	}
-
-	if _, err := db.GetCheckpoint(h.database, sessionID, turn); err != nil {
-		http.Error(w, "checkpoint not found", http.StatusNotFound)
-		return
-	}
-
-	// Truncate logs and results to the restored turn.
-	_ = db.DeleteSessionLogsAfter(h.database, sessionID, turn)
-	_ = db.DeleteTurnResultsAfter(h.database, sessionID, turn)
-
-	// Return the remaining turn results so the client can rebuild the chat log.
-	turnJSONs, err := db.ListTurnResults(h.database, sessionID)
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	buf := []byte("[")
-	for i, s := range turnJSONs {
-		if i > 0 {
-			buf = append(buf, ',')
-		}
-		buf = append(buf, []byte(s)...)
-	}
-	buf = append(buf, ']')
-
-	w.Header().Set("Content-Type", "application/json")
-	w.Write(buf)
-}
 
 func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{
@@ -225,7 +148,9 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	client := &wsClient{conn: conn, sendC: make(chan any, 16)}
+	sessionID, _ := strconv.ParseInt(r.URL.Query().Get("session_id"), 10, 64)
+	// Streaming sends many small deltas; the buffer covers a slow reader.
+	client := &wsClient{conn: conn, sendC: make(chan any, 1024), sessionID: sessionID}
 
 	h.mu.Lock()
 	h.clients[client] = struct{}{}
@@ -255,6 +180,9 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
+	// Tell a new tab whether a turn is already running.
+	client.sendC <- map[string]any{"type": "busy", "session_id": sessionID, "busy": h.turns.busy(sessionID)}
+
 	// Read loop: discard frames, exit on close.
 	for {
 		if _, _, err := conn.Read(ctx); err != nil {
@@ -263,63 +191,9 @@ func (h *Handler) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *Handler) saveTurnResult(result *game.TurnResult) {
-	b, err := json.Marshal(result)
-	if err != nil {
-		log.Printf("[turn] marshal failed: %v", err)
-		return
-	}
-	if err := db.SaveTurnResult(h.database, result.SessionID, result.Turn, string(b)); err != nil {
-		log.Printf("[turn] SaveTurnResult failed: %v", err)
-	}
-}
 
-func (h *Handler) broadcast(v any) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	for client := range h.clients {
-		select {
-		case client.sendC <- v:
-		default: // drop if buffer full
-		}
-	}
-}
 
-// generateAndBroadcastImage queues an image job and broadcasts ImageUpdate when ready.
-func (h *Handler) generateAndBroadcastImage(sessionID int64, turn int, narration string) {
-	if h.comfy == nil {
-		return
-	}
-	prompt := buildImagePrompt(narration)
-	promptID, err := h.comfy.RequestImage(context.Background(), prompt)
-	if err != nil {
-		log.Printf("[comfy] turn %d request failed: %v", turn, err)
-		return
-	}
-	imageURL, err := h.comfy.PollImage(context.Background(), promptID)
-	if err != nil {
-		log.Printf("[comfy] turn %d poll failed: %v", turn, err)
-		return
-	}
-	h.broadcast(game.ImageUpdate{SessionID: sessionID, Turn: turn, ImageURL: imageURL})
-}
 
-// handleComfyStatus reports whether ComfyUI is reachable.
-func (h *Handler) handleComfyStatus(w http.ResponseWriter, r *http.Request) {
-	type statusResp struct {
-		Available bool   `json:"available"`
-		URL       string `json:"url"`
-	}
-	var resp statusResp
-	if h.comfy != nil {
-		resp.Available = h.comfy.Ping(r.Context())
-		if resp.Available {
-			resp.URL = h.comfy.BaseURL()
-		}
-	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
-}
 
 // handleNPCPosition updates a single NPC's lane for manual formation edits.
 // Body: {"session_id": 1, "name": "ガルド", "lane": "front"}
@@ -330,20 +204,23 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 		Lane      string `json:"lane"` // "enemy" | "front" | "party"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
-	laneY := map[string]int{"front": 4, "party": 7}
 	newY, ok := laneY[req.Lane]
 	if !ok {
-		http.Error(w, "lane must be front|party", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "lane は enemy / front / party のいずれかです")
+		return
+	}
+	if h.turns.busy(req.SessionID) {
+		writeError(w, http.StatusConflict, errBusy.Error())
 		return
 	}
 
 	sheets, err := db.GetNPCSheets(h.database, req.SessionID)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	var target *db.NPCSheet
@@ -354,12 +231,12 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		http.Error(w, "npc not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "npc not found")
 		return
 	}
 	target.PositionY = newY
 	if err := db.UpsertNPCSheet(h.database, *target); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -367,17 +244,22 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 
 // personaInfo is the minimal YAML fields we read for the persona list.
 type personaInfo struct {
-	ID   string `yaml:"id"   json:"id"`
-	Name string `yaml:"name" json:"name"`
-	HP   int    `yaml:"hp"   json:"hp"`
-	MP   int    `yaml:"mp"   json:"mp"`
+	ID    string `yaml:"id"     json:"id"`
+	Name  string `yaml:"name"   json:"name"`
+	HP    int    `yaml:"hp"     json:"hp"`
+	MP    int    `yaml:"mp"     json:"mp"`
+	HPMax int    `yaml:"hp_max" json:"hp_max"`
+	MPMax int    `yaml:"mp_max" json:"mp_max"`
 }
+
+// maxNPCs is the party size the concept promises: up to 3 NPC companions.
+const maxNPCs = 3
 
 // handleListPersonas returns all persona YAML files found in personasDir.
 func (h *Handler) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	entries, err := os.ReadDir(h.personasDir)
 	if err != nil {
-		http.Error(w, "cannot read personas dir: "+err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, "cannot read personas dir: "+err.Error())
 		return
 	}
 	var personas []personaInfo
@@ -407,7 +289,7 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		PersonaID string `json:"persona_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 
@@ -429,23 +311,36 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if raw == nil {
-		http.Error(w, "persona not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "persona not found")
 		return
 	}
 
 	var p personaInfo
 	_ = yaml.Unmarshal(raw, &p)
+	existing, _ := db.GetNPCSheets(h.database, req.SessionID)
+	if len(existing) >= maxNPCs {
+		writeError(w, http.StatusBadRequest, "NPC は 3 体までです。入れ替えるときは先に誰かを外してください。")
+		return
+	}
+	if p.HPMax == 0 {
+		p.HPMax = p.HP
+	}
+	if p.MPMax == 0 {
+		p.MPMax = p.MP
+	}
 	sheet := db.NPCSheet{
 		SessionID: req.SessionID,
 		Name:      p.Name,
 		HP:        p.HP,
 		MP:        p.MP,
+		HPMax:     p.HPMax,
+		MPMax:     p.MPMax,
 		PositionX: 0,
 		PositionY: 4, // default: front line
 		YAMLBlob:  string(raw),
 	}
 	if err := db.UpsertNPCSheet(h.database, sheet); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -459,11 +354,11 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if err := db.DeleteNPCSheet(h.database, req.SessionID, req.Name); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -474,23 +369,30 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	var req struct {
-		HP       int    `json:"hp"`
-		MP       int    `json:"mp"`
-		YAMLBlob string `json:"yaml_blob"`
+		HP       int     `json:"hp"`
+		MP       int     `json:"mp"`
+		YAMLBlob *string `json:"yaml_blob"` // 省略すると YAML はそのまま
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
+	if req.YAMLBlob != nil {
+		var probe map[string]any
+		if err := yaml.Unmarshal([]byte(*req.YAMLBlob), &probe); err != nil {
+			writeError(w, http.StatusBadRequest, "YAML として読めません: "+err.Error())
+			return
+		}
+	}
 	if _, err := h.database.Exec(
-		`UPDATE npc_sheets SET hp=?, mp=?, yaml_blob=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+		`UPDATE npc_sheets SET hp=?, mp=?, yaml_blob=COALESCE(?, yaml_blob), updated_at=CURRENT_TIMESTAMP WHERE id=?`,
 		req.HP, req.MP, req.YAMLBlob, id,
 	); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -499,7 +401,7 @@ func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListQuests(w http.ResponseWriter, r *http.Request) {
 	quests, err := db.ListQuests(h.database)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	if quests == nil {
@@ -512,11 +414,11 @@ func (h *Handler) handleListQuests(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.AcceptQuest(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -525,11 +427,11 @@ func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleCompleteQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.CompleteQuest(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -538,7 +440,7 @@ func (h *Handler) handleCompleteQuest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListPCs(w http.ResponseWriter, r *http.Request) {
 	pcs, err := db.ListPlayerCharacters(h.database)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	type pcResp struct {
@@ -561,7 +463,7 @@ func (h *Handler) handleCreatePC(w http.ResponseWriter, r *http.Request) {
 		JSONBlob string `json:"json_blob"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if req.Name == "" {
@@ -569,7 +471,7 @@ func (h *Handler) handleCreatePC(w http.ResponseWriter, r *http.Request) {
 	}
 	pc, err := db.CreatePlayerCharacter(h.database, req.Name, req.JSONBlob)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -580,7 +482,7 @@ func (h *Handler) handleCreatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	var req struct {
@@ -588,11 +490,11 @@ func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 		JSONBlob string `json:"json_blob"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if err := db.UpdatePlayerCharacter(h.database, id, req.Name, req.JSONBlob); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -601,11 +503,11 @@ func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeletePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.DeletePlayerCharacter(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -614,11 +516,11 @@ func (h *Handler) handleDeletePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleActivatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.ActivatePlayerCharacter(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -627,11 +529,11 @@ func (h *Handler) handleActivatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeactivatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.DeactivatePlayerCharacter(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -669,23 +571,40 @@ func (h *Handler) embedRule(ctx context.Context, id int64) bool {
 	return true
 }
 
+// handleListRules pages through the rules. q matches the text or the
+// section (部 > 章 > 見出し); source_type narrows to one kind.
 func (h *Handler) handleListRules(w http.ResponseWriter, r *http.Request) {
-	sourceType := r.URL.Query().Get("source_type")
-	chunks, err := db.ListRAGChunks(h.database, sourceType)
+	q := r.URL.Query()
+	chunks, err := db.ListRAGChunks(h.database, q.Get("source_type"))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]ruleJSON, 0, len(chunks))
+	limit, offset := 50, 0
+	if n, err := strconv.Atoi(q.Get("limit")); err == nil && n > 0 && n <= 500 {
+		limit = n
+	}
+	if n, err := strconv.Atoi(q.Get("offset")); err == nil && n >= 0 {
+		offset = n
+	}
+	needle := strings.TrimSpace(q.Get("q"))
+	items := make([]ruleJSON, 0, limit)
+	total := 0
 	for _, c := range chunks {
-		out = append(out, ruleJSON{
+		if needle != "" && !strings.Contains(c.Text, needle) && !strings.Contains(c.Section, needle) {
+			continue
+		}
+		total++
+		if total <= offset || len(items) == limit {
+			continue
+		}
+		items = append(items, ruleJSON{
 			ID: c.ID, SourceType: c.SourceType, Priority: c.Priority,
 			Tag: c.Tag, Text: c.Text, Enabled: c.Enabled, OverridesID: c.OverridesID,
 			Section: c.Section, PageFrom: c.PageFrom, PageTo: c.PageTo,
 		})
 	}
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(out)
+	writeJSON(w, http.StatusOK, map[string]any{"total": total, "items": items})
 }
 
 func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
@@ -696,14 +615,14 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		OverridesID *int64 `json:"overrides_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
-		http.Error(w, "invalid request", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid request")
 		return
 	}
 	// Only houserule and correction can be created via API
 	priorityMap := map[string]int{"houserule": 20, "correction": 10}
 	priority, ok := priorityMap[req.SourceType]
 	if !ok {
-		http.Error(w, "source_type must be houserule or correction", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "source_type must be houserule or correction")
 		return
 	}
 	id, err := db.InsertRAGChunk(h.database, db.RAGChunk{
@@ -715,7 +634,7 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		OverridesID: req.OverridesID,
 	})
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	embedded := h.embedRule(r.Context(), id)
@@ -731,7 +650,7 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	var req struct {
@@ -740,11 +659,11 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		Enabled bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	if err := db.UpdateRAGChunk(h.database, id, req.Text, req.Tag, req.Enabled); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	h.embedRule(r.Context(), id) // the text may have changed
@@ -754,11 +673,11 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if err := db.DeleteRAGChunk(h.database, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -768,37 +687,16 @@ func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeleteCheckpoint(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	if _, err := h.database.Exec(`DELETE FROM checkpoints WHERE id = ?`, id); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// handleDeleteSessionLogTurn deletes all session_logs for a given turn (DEV mode).
-// Query param session_id is required.
-func (h *Handler) handleDeleteSessionLogTurn(w http.ResponseWriter, r *http.Request) {
-	turn, err := strconv.Atoi(r.PathValue("turn"))
-	if err != nil {
-		http.Error(w, "invalid turn", http.StatusBadRequest)
-		return
-	}
-	sessionID, err := strconv.ParseInt(r.URL.Query().Get("session_id"), 10, 64)
-	if err != nil {
-		http.Error(w, "session_id query param required", http.StatusBadRequest)
-		return
-	}
-	if _, err := h.database.Exec(
-		`DELETE FROM session_logs WHERE session_id = ? AND turn = ?`, sessionID, turn,
-	); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	w.WriteHeader(http.StatusNoContent)
-}
 
 // ── Scenarios ────────────────────────────────────────────────────────────────
 
@@ -806,7 +704,7 @@ func (h *Handler) handleListScenarios(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status") // optional filter: draft/ready/used
 	scenarios, err := db.ListScenarios(h.database, status)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	type scenarioResp struct {
@@ -833,12 +731,12 @@ func (h *Handler) handleListScenarios(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetScenario(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	s, err := db.GetScenario(h.database, id)
 	if err != nil {
-		http.Error(w, "scenario not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "scenario not found")
 		return
 	}
 	images, _ := db.ListScenarioImages(h.database, id)
@@ -872,7 +770,7 @@ func (h *Handler) handleGetScenario(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleListBackgrounds(w http.ResponseWriter, r *http.Request) {
 	images, err := db.ListBackgroundImages(h.database)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	type imgResp struct {
@@ -894,19 +792,19 @@ func (h *Handler) handleListBackgrounds(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) handleServeScenarioImage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	imgID, err := strconv.ParseInt(r.PathValue("imgid"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid imgid", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid imgid")
 		return
 	}
 	row := h.database.QueryRow(
 		`SELECT file_path FROM scenario_images WHERE id=? AND scenario_id=?`, imgID, id)
 	var filePath string
 	if err := row.Scan(&filePath); err != nil {
-		http.Error(w, "image not found", http.StatusNotFound)
+		writeError(w, http.StatusNotFound, "image not found")
 		return
 	}
 	http.ServeFile(w, r, filePath)
@@ -915,31 +813,44 @@ func (h *Handler) handleServeScenarioImage(w http.ResponseWriter, r *http.Reques
 func (h *Handler) handleUpdateScenarioStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		http.Error(w, "invalid id", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
 	var req struct {
 		Status string `json:"status"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	valid := map[string]bool{"draft": true, "ready": true, "used": true}
 	if !valid[req.Status] {
-		http.Error(w, "status must be draft|ready|used", http.StatusBadRequest)
+		writeError(w, http.StatusBadRequest, "status must be draft|ready|used")
 		return
 	}
 	if err := db.UpdateScenarioStatus(h.database, id, req.Status); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func buildImagePrompt(narration string) string {
-	if len(narration) > 200 {
-		narration = narration[:200]
+
+// send delivers a message to the clients watching sessionID. Every message
+// carries "session_id". A client too slow to keep up loses messages; it
+// reloads the session state when the turn ends.
+func (h *Handler) send(sessionID int64, msg map[string]any) {
+	msg["session_id"] = sessionID
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for client := range h.clients {
+		if client.sessionID != 0 && client.sessionID != sessionID {
+			continue
+		}
+		select {
+		case client.sendC <- msg:
+		default:
+			log.Printf("[ws] dropped a %v message for a slow client", msg["type"])
+		}
 	}
-	return "fantasy TRPG scene, " + narration
 }

@@ -56,7 +56,7 @@ func TestRunStageFirstAttemptOK(t *testing.T) {
 	m := &scriptedLLM{replies: []llm.Result{{Text: "ok", FinishReason: "stop"}}}
 	e := newStageEngine(t, m, 2)
 
-	res, attempts, err := e.runStage(context.Background(), 1, 1,
+	res, attempts, err := e.runStage(context.Background(), stageRun{sessionID: 1, turn: 1},
 		stage{name: "gm", opts: llm.CompletionOptions{MaxTokens: 100}, validate: nonEmpty},
 		[]llm.Message{{Role: "user", Content: "x"}})
 	if err != nil || res.Text != "ok" || attempts != 1 {
@@ -74,7 +74,7 @@ func TestRunStageRethinksAfterNG(t *testing.T) {
 	}}
 	e := newStageEngine(t, m, 2)
 
-	res, attempts, err := e.runStage(context.Background(), 1, 1,
+	res, attempts, err := e.runStage(context.Background(), stageRun{sessionID: 1, turn: 1},
 		stage{name: "gm", opts: llm.CompletionOptions{MaxTokens: 100}, retryHint: "やり直して", validate: nonEmpty},
 		[]llm.Message{{Role: "user", Content: "x"}})
 	if err != nil || res.Text != "ok" || attempts != 2 {
@@ -99,7 +99,7 @@ func TestRunStageGivesUpAfterLimit(t *testing.T) {
 	m := &scriptedLLM{replies: []llm.Result{{}, {}, {}, {Text: "too late"}}}
 	e := newStageEngine(t, m, 2)
 
-	_, attempts, err := e.runStage(context.Background(), 1, 1,
+	_, attempts, err := e.runStage(context.Background(), stageRun{sessionID: 1, turn: 1},
 		stage{name: "gm", validate: nonEmpty}, []llm.Message{{Role: "user", Content: "x"}})
 	if err == nil {
 		t.Fatal("expected error after retry limit")
@@ -113,7 +113,7 @@ func TestRunStageDoesNotRetryTransportError(t *testing.T) {
 	m := &scriptedLLM{} // every call fails
 	e := newStageEngine(t, m, 2)
 
-	_, attempts, err := e.runStage(context.Background(), 1, 1,
+	_, attempts, err := e.runStage(context.Background(), stageRun{sessionID: 1, turn: 1},
 		stage{name: "gm", validate: nonEmpty}, []llm.Message{{Role: "user", Content: "x"}})
 	if err == nil || attempts != 1 {
 		t.Fatalf("attempts=%d err=%v, want 1 attempt and an error", attempts, err)
@@ -127,7 +127,7 @@ func TestRunStageRejectsTruncatedOutput(t *testing.T) {
 	}}
 	e := newStageEngine(t, m, 2)
 
-	res, attempts, err := e.runStage(context.Background(), 1, 1,
+	res, attempts, err := e.runStage(context.Background(), stageRun{sessionID: 1, turn: 1},
 		stage{name: "gm", validate: nonEmpty}, []llm.Message{{Role: "user", Content: "x"}})
 	if err != nil || attempts != 2 || res.Text != "完結した文。" {
 		t.Fatalf("got %q attempts=%d err=%v", res.Text, attempts, err)
@@ -159,7 +159,7 @@ func TestProcessTurnCallsStagesSerially(t *testing.T) {
 		{Text: `[{"npc_name":"A","hp_delta":-5,"mp_cost":3},{"npc_name":"B","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
 	}, "A", "B")
 
-	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"})
+	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}, nil)
 	if err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestProcessTurnSkipsNPCThatNeverValidates(t *testing.T) {
 		{Text: `[{"npc_name":"B","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
 	}, "A", "B")
 
-	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"})
+	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}, nil)
 	if err != nil {
 		t.Fatalf("ProcessTurn should continue without the failed NPC: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestProcessTurnSupportFallsBackAfterRetries(t *testing.T) {
 		{Text: `[]`, FinishReason: "stop"},
 	}, "A")
 
-	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"})
+	res, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}, nil)
 	if err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestProcessTurnGivesRulesToGMAndSupport(t *testing.T) {
 	session, _ := db.CreateSession(database, "q")
 	_ = db.UpsertNPCSheet(database, db.NPCSheet{SessionID: session.ID, Name: "A", HP: 20, MP: 20})
 
-	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: session.ID, Turn: 1, Text: "魔法で攻撃"}); err != nil {
+	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: session.ID, Turn: 1, Text: "魔法で攻撃"}, nil); err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
 	// Each stage's rules are in its own instruction, the last message.
@@ -281,7 +281,7 @@ func TestProcessTurnStagesShareOnePrefix(t *testing.T) {
 		{Text: `[{"npc_name":"A","hp_delta":-5,"mp_cost":3},{"npc_name":"C","hp_delta":-5,"mp_cost":3}]`, FinishReason: "stop"},
 	}, "A", "B", "C")
 
-	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}); err != nil {
+	if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: 1, Text: "進む"}, nil); err != nil {
 		t.Fatalf("ProcessTurn: %v", err)
 	}
 	// First attempts only: GM, NPC A, NPC B, NPC C, Support.
@@ -325,7 +325,7 @@ func TestStageSystemPromptIsStable(t *testing.T) {
 		{Text: `[{"npc_name":"A","hp_delta":0,"mp_cost":0}]`, FinishReason: "stop"},
 	}, "A")
 	for turn := 1; turn <= 2; turn++ {
-		if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: turn, Text: "進む"}); err != nil {
+		if _, err := e.ProcessTurn(context.Background(), PlayerInput{SessionID: sid, Turn: turn, Text: "進む"}, nil); err != nil {
 			t.Fatalf("turn %d: %v", turn, err)
 		}
 	}

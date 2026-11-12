@@ -40,7 +40,8 @@ func pruneCheckpoints(d *sql.DB, sessionID int64) error {
 func GetCheckpoint(d *sql.DB, sessionID int64, turn int) (*Checkpoint, error) {
 	row := d.QueryRow(
 		`SELECT id, session_id, turn, snapshot_json, created_at
-		 FROM checkpoints WHERE session_id = ? AND turn = ?`,
+		 FROM checkpoints WHERE session_id = ? AND turn = ?
+		 ORDER BY id DESC LIMIT 1`,
 		sessionID, turn,
 	)
 	cp := &Checkpoint{}
@@ -53,7 +54,7 @@ func GetCheckpoint(d *sql.DB, sessionID int64, turn int) (*Checkpoint, error) {
 func ListCheckpoints(d *sql.DB, sessionID int64) ([]Checkpoint, error) {
 	rows, err := d.Query(
 		`SELECT id, session_id, turn, snapshot_json, created_at
-		 FROM checkpoints WHERE session_id = ? ORDER BY turn DESC`, sessionID)
+		 FROM checkpoints WHERE session_id = ? ORDER BY turn DESC, id DESC`, sessionID)
 	if err != nil {
 		return nil, err
 	}

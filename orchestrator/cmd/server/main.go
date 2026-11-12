@@ -13,6 +13,7 @@ import (
 	"github.com/kf/sw25-omni-master/pkg/config"
 	"github.com/kf/sw25-omni-master/pkg/db"
 	"github.com/kf/sw25-omni-master/pkg/game"
+	"github.com/kf/sw25-omni-master/pkg/images"
 	"github.com/kf/sw25-omni-master/pkg/llm"
 	"github.com/kf/sw25-omni-master/pkg/rag"
 )
@@ -50,20 +51,28 @@ func main() {
 	checkMlxServe(cfg.LLMURL, cfg.LLMModelID)
 	checkMlxServe(cfg.EmbedURL, cfg.EmbedModelID)
 
-	chat := llm.New(cfg.LLMURL, cfg.LLMModelID, cfg.LLMTimeout)
+	chat := llm.New(cfg.LLMURL, cfg.LLMModelID, cfg.LLMTimeout).WithHeader("X-APC-Tenant", cfg.APCTenant)
 	ragEngine := rag.New(database, llm.New(cfg.EmbedURL, cfg.EmbedModelID, cfg.LLMTimeout))
-	comfy := game.NewComfyUIClient(cfg.ComfyURL) // nil if COMFY_URL is empty
 	engine := game.NewEngine(database, chat, ragEngine, cfg.StageRetryLimit)
 
-	handler := api.New(database, engine, ragEngine, comfy, cfg.PersonasDir)
+	handler := api.New(database, engine, ragEngine, api.Options{
+		PersonasDir: cfg.PersonasDir,
+		TurnTimeout: cfg.TurnTimeout,
+		Images:      images.New(cfg.ImagesURL),
+		ImageEvery:  cfg.ImageEvery,
+		ImagesDir:   cfg.ImagesDir,
+		LLM:         api.Endpoint{URL: cfg.LLMURL, ModelID: cfg.LLMModelID},
+		Embed:       api.Endpoint{URL: cfg.EmbedURL, ModelID: cfg.EmbedModelID},
+		APCTenant:   cfg.APCTenant,
+	})
 	mux := http.NewServeMux()
 	handler.Routes(mux)
 
-	comfyStatus := "disabled"
-	if comfy != nil {
-		comfyStatus = cfg.ComfyURL
+	imagesStatus := "off"
+	if cfg.ImagesURL != "" && cfg.ImageEvery > 0 {
+		imagesStatus = fmt.Sprintf("%s (every %d turns)", cfg.ImagesURL, cfg.ImageEvery)
 	}
-	log.Printf("Omni-Master listening on %s  (ComfyUI: %s)", cfg.Addr, comfyStatus)
+	log.Printf("Omni-Master listening on %s  (images: %s)", cfg.Addr, imagesStatus)
 	log.Fatal(http.ListenAndServe(cfg.Addr, mux))
 }
 

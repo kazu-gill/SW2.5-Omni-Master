@@ -202,3 +202,66 @@ func TestOpenMigratesOldRAGTable(t *testing.T) {
 		t.Fatalf("chunks=%+v err=%v", chunks, err)
 	}
 }
+
+func TestRestoreBeforeTurnPutsSheetsBackAndDropsLaterTurns(t *testing.T) {
+	d := openTestDB(t)
+	s, _ := CreateSessionTitled(d, "t", "")
+	_ = UpsertNPCSheet(d, NPCSheet{SessionID: s.ID, Name: "ガルド", HP: 30, MP: 10, HPMax: 30, MPMax: 10, PositionY: 4})
+	sheets, _ := GetNPCSheets(d, s.ID)
+	snap := `{"npc_sheets":[{"Name":"ガルド","HP":30,"MP":10,"PositionY":4}]}` // 旧形式 (Go のフィールド名) も読める
+	_ = SaveCheckpoint(d, s.ID, 2, snap)
+	_ = SaveTurnResult(d, s.ID, 1, `{"turn":1}`)
+	_ = SaveTurnResult(d, s.ID, 2, `{"turn":2}`)
+	_ = SaveTurnResult(d, s.ID, 3, `{"turn":3}`)
+	_ = AppendLog(d, s.ID, 2, "gm", "x")
+	_ = AddSummary(d, s.ID, 2, []string{"要約"})
+
+	sheets[0].HP, sheets[0].MP, sheets[0].PositionY = 5, 0, 7
+	_ = UpsertNPCSheet(d, sheets[0])
+	_ = UpsertNPCSheet(d, NPCSheet{SessionID: s.ID, Name: "後から追加", HP: 1})
+
+	if err := RestoreBeforeTurn(d, s.ID, 2); err != nil {
+		t.Fatalf("RestoreBeforeTurn: %v", err)
+	}
+	got, _ := GetNPCSheets(d, s.ID)
+	if len(got) != 1 || got[0].HP != 30 || got[0].MP != 10 || got[0].PositionY != 4 {
+		t.Errorf("sheets = %+v", got)
+	}
+	if n, _ := LatestTurn(d, s.ID); n != 1 {
+		t.Errorf("LatestTurn = %d, want 1", n)
+	}
+	if sum, _ := ListSummary(d, s.ID); len(sum) != 0 {
+		t.Errorf("summary covering turn 2 should be gone: %v", sum)
+	}
+	if _, err := GetCheckpoint(d, s.ID, 2); err == nil {
+		t.Error("checkpoint of turn 2 should be gone")
+	}
+}
+
+func TestSessionsListAndSummary(t *testing.T) {
+	d := openTestDB(t)
+	a, _ := CreateSessionTitled(d, "古い", "")
+	b, _ := CreateSessionTitled(d, "新しい", "3")
+	_, _ = d.Exec(`UPDATE sessions SET updated_at = '2000-01-01' WHERE id = ?`, a.ID)
+	list, err := ListSessions(d)
+	if err != nil || len(list) != 2 || list[0].ID != b.ID || list[0].QuestID != "3" {
+		t.Fatalf("list=%+v err=%v", list, err)
+	}
+	_ = AddSummary(d, b.ID, 3, []string{"一行目", "二行目"})
+	_ = AddSummary(d, b.ID, 6, []string{"三行目"})
+	sum, _ := ListSummary(d, b.ID)
+	upto, _ := SummarizedUpto(d, b.ID)
+	if len(sum) != 3 || sum[2] != "三行目" || upto != 6 {
+		t.Errorf("sum=%v upto=%d", sum, upto)
+	}
+}
+
+func TestRAGSearchPriorityBeatsSlightlyCloserRulebook(t *testing.T) {
+	d := openTestDB(t)
+	_, _ = InsertRAGChunk(d, RAGChunk{SourceType: "rulebook", Text: "本文", Enabled: true, Embedding: []float32{1, 0.05, 0}})
+	_, _ = InsertRAGChunk(d, RAGChunk{SourceType: "houserule", Priority: 20, Text: "ハウスルール", Enabled: true, Embedding: []float32{1, 0.2, 0}})
+	got, _ := SearchRAGChunks(d, []float32{1, 0, 0}, 2)
+	if got[0].SourceType != "houserule" || got[0].Score <= 0 {
+		t.Errorf("got %+v", got)
+	}
+}

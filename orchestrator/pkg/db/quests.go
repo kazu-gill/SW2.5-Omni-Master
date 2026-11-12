@@ -91,3 +91,16 @@ func SeedQuests(d *sql.DB) error {
 	}
 	return nil
 }
+
+// GetQuest returns one quest.
+func GetQuest(d *sql.DB, id int64) (*Quest, error) {
+	var q Quest
+	err := d.QueryRow(
+		`SELECT id, rank, title, description, client, reward, target, level, tags, status
+		 FROM quests WHERE id = ?`, id).
+		Scan(&q.ID, &q.Rank, &q.Title, &q.Description, &q.Client, &q.Reward, &q.Target, &q.Level, &q.Tags, &q.Status)
+	if err != nil {
+		return nil, fmt.Errorf("GetQuest(%d): %w", id, err)
+	}
+	return &q, nil
+}

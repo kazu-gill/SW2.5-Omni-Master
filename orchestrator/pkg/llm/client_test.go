@@ -3,8 +3,10 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -163,5 +165,65 @@ func TestEmbedEmptyData(t *testing.T) {
 	})
 	if _, err := c.Embed(context.Background(), "test"); err == nil {
 		t.Fatal("expected error for empty data, got nil")
+	}
+}
+
+func TestCompleteStreamsDeltas(t *testing.T) {
+	var body map[string]any
+	c := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		body = captureRequest(t, r)
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, chunk := range []string{
+			`{"choices":[{"delta":{"reasoning_content":"考え中"}}]}`,
+			`{"choices":[{"delta":{"content":"扉が"}}]}`,
+			`{"choices":[{"delta":{"content":"開いた。"}}]}`,
+			`{"choices":[{"delta":{},"finish_reason":"stop"}]}`,
+		} {
+			fmt.Fprintf(w, "data: %s\n\n", chunk)
+		}
+		fmt.Fprint(w, "data: [DONE]\n\n")
+	})
+
+	var got []string
+	res, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, CompletionOptions{
+		OnDelta: func(s string) { got = append(got, s) },
+	})
+	if err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if body["stream"] != true {
+		t.Errorf("stream flag not sent: %v", body["stream"])
+	}
+	if res.Text != "扉が開いた。" || res.Reasoning != "考え中" || res.FinishReason != "stop" {
+		t.Errorf("result = %+v", res)
+	}
+	if strings.Join(got, "|") != "扉が|開いた。" {
+		t.Errorf("deltas = %v", got)
+	}
+}
+
+func TestCompleteStreamErrorStatus(t *testing.T) {
+	c := mockServer(t, func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "busy", http.StatusServiceUnavailable)
+	})
+	_, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, CompletionOptions{OnDelta: func(string) {}})
+	if err == nil || !strings.Contains(err.Error(), "503") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+func TestClientSendsTenantHeader(t *testing.T) {
+	var tenant string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tenant = r.Header.Get("X-APC-Tenant")
+		chatReply(w, "ok", "", "stop")
+	}))
+	t.Cleanup(srv.Close)
+	c := New(srv.URL, "m", 5*time.Second).WithHeader("X-APC-Tenant", "sw25")
+	if _, err := c.Complete(context.Background(), []Message{{Role: "user", Content: "x"}}, CompletionOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if tenant != "sw25" {
+		t.Errorf("X-APC-Tenant = %q", tenant)
 	}
 }

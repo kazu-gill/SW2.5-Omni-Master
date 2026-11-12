@@ -48,6 +48,9 @@ func migrateSchema(d *sql.DB) error {
 		`ALTER TABLE rag_chunks ADD COLUMN section TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE rag_chunks ADD COLUMN page_from INTEGER`,
 		`ALTER TABLE rag_chunks ADD COLUMN page_to INTEGER`,
+		`ALTER TABLE sessions ADD COLUMN title TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE npc_sheets ADD COLUMN hp_max INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE npc_sheets ADD COLUMN mp_max INTEGER NOT NULL DEFAULT 0`,
 	}
 	for _, stmt := range migrations {
 		if _, err := d.Exec(stmt); err != nil {

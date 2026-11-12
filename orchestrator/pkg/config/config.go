@@ -13,7 +13,6 @@ import (
 type Config struct {
 	DBPath      string
 	Addr        string
-	ComfyURL    string
 	PersonasDir string
 
 	// All turn stages (GM / NPC / Support) share one chat model on mlx-serve.
@@ -26,6 +25,18 @@ type Config struct {
 
 	EmbedURL     string
 	EmbedModelID string
+
+	// APCTenant is sent as X-APC-Tenant so mlx-vlm keeps this app's prefix
+	// cache entries apart from other clients of the shared model.
+	APCTenant string
+	// TurnTimeout caps a whole turn (all stages and re-thinks).
+	TurnTimeout time.Duration
+
+	// ImagesURL is the MLX image studio (mlx-studio-web); "" turns images off.
+	ImagesURL string
+	// ImageEvery draws a scene on turn 1 and every N-th turn (0 = never).
+	ImageEvery int
+	ImagesDir  string
 }
 
 // Load reads config.env at envPath, then overrides with any OS environment
@@ -63,11 +74,18 @@ func Load(envPath string) (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	turnTimeoutSec, err := getInt("TURN_TIMEOUT_SEC", 900)
+	if err != nil {
+		return nil, err
+	}
+	imageEvery, err := getInt("IMAGE_EVERY", 3)
+	if err != nil {
+		return nil, err
+	}
 
 	return &Config{
 		DBPath:          get("DB_PATH", "data/omni.db"),
 		Addr:            get("ADDR", ":8080"),
-		ComfyURL:        get("COMFY_URL", ""),
 		PersonasDir:     get("PERSONAS_DIR", "data/personas"),
 		LLMURL:          get("LLM_URL", "http://127.0.0.1:11441"),
 		LLMModelID:      get("LLM_MODEL_ID", "gemma4-31b-it-heretic-4bit-mtp"),
@@ -75,6 +93,11 @@ func Load(envPath string) (*Config, error) {
 		StageRetryLimit: retryLimit,
 		EmbedURL:        get("EMBED_URL", "http://127.0.0.1:11455"),
 		EmbedModelID:    get("EMBED_MODEL_ID", "bge-m3-q8"),
+		APCTenant:       get("APC_TENANT", "sw25"),
+		TurnTimeout:     time.Duration(turnTimeoutSec) * time.Second,
+		ImagesURL:       get("IMAGES_URL", "http://127.0.0.1:11462"),
+		ImageEvery:      imageEvery,
+		ImagesDir:       get("IMAGES_DIR", "data/images"),
 	}, nil
 }
 

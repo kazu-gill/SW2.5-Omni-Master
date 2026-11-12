@@ -3,7 +3,8 @@ PRAGMA foreign_keys = ON;
 
 CREATE TABLE IF NOT EXISTS sessions (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
-    quest_id   TEXT    NOT NULL DEFAULT '',
+    title      TEXT    NOT NULL DEFAULT '',
+    quest_id   TEXT    NOT NULL DEFAULT '',  -- quests.id (文字列)。空なら未受注
     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
@@ -14,6 +15,8 @@ CREATE TABLE IF NOT EXISTS npc_sheets (
     name       TEXT    NOT NULL,
     hp         INTEGER NOT NULL DEFAULT 0,
     mp         INTEGER NOT NULL DEFAULT 0,
+    hp_max     INTEGER NOT NULL DEFAULT 0,
+    mp_max     INTEGER NOT NULL DEFAULT 0,
     position_x INTEGER NOT NULL DEFAULT 0,
     position_y INTEGER NOT NULL DEFAULT 0,
     yaml_blob  TEXT    NOT NULL DEFAULT '',
@@ -153,3 +156,14 @@ CREATE TABLE IF NOT EXISTS scenario_images (
 CREATE INDEX IF NOT EXISTS idx_scenarios_status        ON scenarios(status);
 CREATE INDEX IF NOT EXISTS idx_scenario_images_scen    ON scenario_images(scenario_id);
 CREATE INDEX IF NOT EXISTS idx_scenario_images_cat     ON scenario_images(category);
+
+-- セッション要約。数ターンごとに、まだ要約していないターンから主語付きの 1 文を数個作る。
+-- 直近のターンは原文のまま送り、それより前はこの要約だけを LLM に渡す。
+CREATE TABLE IF NOT EXISTS session_summaries (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    session_id INTEGER NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+    upto_turn  INTEGER NOT NULL,                -- このターンまでを要約済み
+    text       TEXT    NOT NULL,                -- 1 文
+    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_session_summaries ON session_summaries(session_id, upto_turn);
