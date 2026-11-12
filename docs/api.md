@@ -42,6 +42,12 @@ WS  image  (数ターンごと、後から)
 
 `mode: "gm"` は GM 直訴。GM だけが答え、NPC と数値は動かない。
 
+補足:
+- **中断** (`/cancel`) の後は WS に `error` (「ターンを中断しました…」) と `busy: false` が届く。状態はターンの開始前に戻っている
+- **busy** はターン確定後の要約 (`stage: summary`) が終わるまで true のまま。要約中も次の送信は 409
+- **やり直し** (`/redo`) は元のターンのモード (行動 / 直訴) のまま。モードは変えられない
+- **巻き戻し** (`/restore {turn}`) の `turn` は「そのターンの開始前」。チェックポイントは最新 10 件だけ残る
+
 ### パーティ・PC・クエスト・ルール (既存を継続)
 | メソッド | パス | 備考 |
 |---|---|---|
@@ -53,7 +59,7 @@ WS  image  (数ターンごと、後から)
 | GET/POST/PUT/DELETE | `/api/player-characters[/{id}]`、`PATCH .../{id}/activate` | 既存どおり |
 | GET | `/api/quests` | 既存どおり |
 | PATCH | `/api/quests/{id}/complete` | 既存どおり |
-| GET | `/api/rules?q=&source_type=&limit=50&offset=0` | `{"total","items":[Rule]}`。q は本文・節の部分一致 |
+| GET | `/api/rules?q=&source_type=&limit=50&offset=0` | `{"total","items":[Rule]}`。q は本文・節の部分一致。空の q / source_type は絞り込みなし |
 | GET | `/api/rules/search?q=&k=5` | `[RuleHit]`。ゲーム中と同じ検索 (埋め込み + 用語の完全一致) |
 | POST/PATCH/DELETE | `/api/rules[/{id}]` | 既存どおり (保存時に埋め込む) |
 | GET | `/api/sessions/{id}/images/{file}` | 生成画像 (png) |
@@ -78,7 +84,8 @@ WS  image  (数ターンごと、後から)
 ```ts
 Session        { id, title, quest_id: number|null, turn: number, created_at, updated_at }
 SessionSummary { ...Session, quest_title: string, last_line: string }
-SessionState   { session: Session, quest: Quest|null, pc: PlayerCharacter|null,
+SessionState   { session: Session, quest: Quest|null,      // quest は GET /api/quests の要素と同じ形
+                 pc: { id, name, is_active, sheet, json_blob }|null,  // 全体で 1 人の「使用中」PC。sheet は json_blob を解析したもの
                  npc_sheets: NPCSheet[], turns: TurnResult[], checkpoints: {turn, created_at}[],
                  summary: string[], busy: boolean }
 NPCSheet       { id, session_id, name, hp, mp, hp_max, mp_max, lane: "enemy"|"front"|"party", yaml_blob }
