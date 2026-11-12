@@ -16,11 +16,13 @@
 | 機能 | 概要 |
 |------|------|
 | **自律 GM エージェント** | Gemma 4 31B-it がナラティブとルーリングを生成 |
-| **マルチ NPC エージェント** | 最大 3 体の NPC が同じモデルを順番に使い、それぞれの人格で行動。段ごとに出力を検証し、不正なら再思考 |
-| **ルールブック RAG** | ベクター検索でルール文書を動的に参照、一貫性のある判定を実現 |
-| **リアルタイム UI** | WebSocket + React によるバトルマップと GM チャンネル |
-| **画像生成** | ComfyUI (Stable Diffusion) によるシーン画像・NPC ポートレートの自動生成 (オプション) |
-| **セッションチェックポイント** | 最大 10 スナップショットの自動保存と任意時点への復元 |
+| **マルチ NPC エージェント** | 最大 3 体の NPC が同じモデルを順番に使い、ペルソナ (性格・口調・経歴・行動原則) に沿って行動。段ごとに出力を検証し、不正なら再思考 |
+| **セッションの記憶** | 卓の約束・受注クエスト・PC・NPC ペルソナを固定の前置きにし、3 ターンごとに書くあらすじと直近 2 ターンの原文で前の出来事を覚えておく |
+| **判定はコードが振る** | GM / NPC は判定の種類・基準値・目標値だけを書き、2d6 はオーケストレーターが振る (12 は自動成功、2 は自動失敗) |
+| **ルールブック RAG** | ベクター検索に加え、特技・魔法などの用語を読みで引く (「庇う」「かばう」でも同じ用語に当たる)。ハウスルール・訂正を優先 |
+| **複数セッション** | セッションの作成・一覧・削除。中断、直前のターンの作り直し (入力の修正も可)、任意のターンの開始前への巻き戻し (NPC の HP/MP・配置も戻る。チェックポイントは最新 10 件) |
+| **リアルタイム UI** | WebSocket で段ごとの進行と GM / NPC の本文を逐次表示。ダイスとルールのチップ、3 レーンの配置、スマホ幅 (375px) とダークモードに対応 |
+| **シーン画像** | MLX の画像工房 (mlx-studio-web) で 1 ターン目と数ターンごとに挿絵を生成 (オプション) |
 | **バッチメンテナンス** | ルールブック Markdown のチャンク化・インポート、シナリオのオフライン事前生成 |
 
 ---
@@ -35,32 +37,33 @@ Go Orchestrator  :8080
   ├─ REST API ハンドラ
   ├─ ゲームエンジン（ターン処理）
   └─ WebSocket ハブ（ブロードキャスト）
-        │ HTTP (OpenAI 互換)
+        │ HTTP (OpenAI 互換、SSE ストリーミング、X-APC-Tenant: sw25)
         ├─▶ mlx-serve  :11441  gemma4-31b-it-heretic-4bit-mtp
-        │                      (GM / NPC / Support を 1 モデルで直列処理)
-        └─▶ mlx-serve  :11455  bge-m3-q8 (RAG 埋め込み, 1024 次元)
+        │                      (GM / NPC / Support / 要約を 1 モデルで直列処理)
+        ├─▶ mlx-serve  :11455  bge-m3-q8 (RAG 埋め込み, 1024 次元)
+        └─▶ mlx-studio-web :11462  画像工房 (オプション。構図は Gemma、描画は ComfyUI)
                 │
         SQLite (omni.db)
-          sessions / npc_sheets / rag_chunks / checkpoints …
-                │ オプション
-        ComfyUI  :8188  (別マシン可)
+          sessions / npc_sheets / turn_results / session_summaries / rag_chunks / checkpoints …
 ```
 
 **ターン処理フロー:**
 
-すべての LLM 段は同じモデルを 1 段ずつ直列に呼びます。
+すべての LLM 段は同じモデルを 1 段ずつ直列に呼びます。1 セッションで同時に走るターンは 1 つです。
 
-1. プレイヤーが UI から行動を入力
-2. Orchestrator がチェックポイントを保存
+1. プレイヤーが UI から行動を入力 (`POST /api/sessions/{id}/turn`。すぐ 202 が返り、ターン番号はサーバーが決める)
+2. Orchestrator がチェックポイント (ターン開始前の NPC の状態) を保存
 3. RAG でプレイヤー入力に関連するルールを検索 (上位 5 件)
-4. GM が RAG コンテキスト付きでナラティブを生成
-5. NPC 1 → NPC 2 → NPC 3 の順 (シート順) にアクションを生成
-6. Support が NPC の行動から引いたルール (上位 3 件) を参照してリソース変更 (HP/MP) を確定
-7. DB (HP/MP・隊列・ログ) を更新
-8. ターン結果を WebSocket で全クライアントへブロードキャスト
-9. ComfyUI が非同期でシーン画像を生成 (有効時)
+4. GM が固定の前置き・あらすじ・直近 2 ターン・ルールを受けてナラティブを生成。判定が要るときは「判定: 誰/判定名/基準値N/目標値M」の行を書き、コードが 2d6 を振る
+5. NPC 1 → NPC 2 → NPC 3 の順 (シート順) にアクションを生成。YAML の `check` で判定を求めればコードが振る
+6. Support が NPC の行動から引いたルール (上位 3 件) と判定結果を参照してリソース変更 (HP/MP) を確定
+7. DB (HP/MP・隊列・ログ・ターン結果) を更新
+8. 進行 (段の開始・本文の差分・ルール・判定・確定したターン) を WebSocket `/ws?session_id=` で配信
+9. 3 ターンたまるごとにあらすじを更新し、1 ターン目と `IMAGE_EVERY` ターンごとに画像工房でシーン画像を生成 (有効時)
 
-各段の出力は検証され、NG ならその段だけを「再思考」させます (却下した出力とエラー内容を渡し、thinking を有効化して呼び直す。最大 `STAGE_RETRY_LIMIT` 回)。それでも NG の場合、NPC はそのターンを見送り、Support は NPC 自身の HP/MP 値を使います (どちらも `warnings` に記録)。GM が NG のままならターンは失敗します。段ごとの呼び出し回数はターン結果の `stage_attempts` に入ります。詳細は [docs/spec_ja.md](docs/spec_ja.md) を参照してください。
+GM 直訴 (`mode: "gm"`) は GM だけが答え、NPC と数値は動きません。各段の出力は検証され、NG ならその段だけを「再思考」させます (却下した出力とエラー内容を渡し、thinking を有効化して呼び直す。最大 `STAGE_RETRY_LIMIT` 回)。それでも NG の場合、NPC はそのターンを見送り、Support は NPC 自身の HP/MP 値を使います (どちらも `warnings` に記録)。GM が NG のままならターンは失敗します。失敗・中断・`TURN_TIMEOUT_SEC` 超過のターンは、開始前の状態に戻ります。段ごとの呼び出し回数はターン結果の `stage_attempts` に入ります。
+
+API の取り決め (エンドポイント・WebSocket のイベント・型) は [docs/api.md](docs/api.md)、処理の詳細は [docs/spec_ja.md](docs/spec_ja.md) を参照してください。
 
 ---
 
@@ -76,7 +79,7 @@ Go Orchestrator  :8080
 | [uv](https://github.com/astral-sh/uv) | 最新版 | Python パッケージ管理 |
 | [PowerShell](https://github.com/PowerShell/PowerShell) | 7+ | 起動・停止スクリプト |
 | SQLite3 | 3.35+ | DB CLI (初期化スクリプト用) |
-| [ComfyUI](https://github.com/comfyanonymous/ComfyUI) | — | 画像生成 **(オプション)** |
+| mlx-studio-web (MLX の画像工房) | — | シーン画像 **(オプション)**。描画は Windows 側の ComfyUI |
 
 **必要な mlx-serve プロファイル:**
 
@@ -85,12 +88,16 @@ Go Orchestrator  :8080
 | GM / NPC / Support | `gemma4-31b-it-heretic-4bit-mtp` | `http://127.0.0.1:11441` | mlx-vlm + MTP 投機的デコード、約 22GB |
 | RAG 埋め込み | `bge-m3-q8` | `http://127.0.0.1:11455` | llama-server (mlx-serve 内部で使用)、1024 次元 |
 
-起動は mlx-serve 側で行います:
+起動は mlx-serve 側で行います。MLX ダッシュボード (http://127.0.0.1:11470/) から起動するか、スクリプトを使います。チャット用の LLM は同時に 1 本しか常駐できないので、ほかのチャットモデルが動いていれば Gemma に切り替えてください。
 
 ```bash
 pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
 pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 ```
+
+Gemma プロファイルの起動環境には、プレフィックスキャッシュ (APC) 用に `APC_CHECKPOINT_GUARD_TOKENS=8` と `APC_CHECKPOINT_ENTRIES=4` を設定することを推奨します (理由と設定方法は [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md))。
+
+シーン画像を使う場合は、MLX の画像工房 (mlx-studio-web, :11462) も起動しておきます。構図を決めるのに Gemma を使うため、Gemma も起動している必要があります。
 
 ---
 
@@ -120,8 +127,10 @@ LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
 EMBED_URL=http://127.0.0.1:11455
 EMBED_MODEL_ID=bge-m3-q8
 
-# オプション: 画像生成を使う場合
-COMFY_URL=http://<ComfyUI-HOST>:8188
+# シーン画像 (MLX の画像工房)。使わない場合は IMAGE_EVERY=0
+IMAGES_URL=http://127.0.0.1:11462
+IMAGE_EVERY=3
+IMAGES_DIR=/path/to/sw25-omni-master/data/images
 ```
 
 設定キーの詳細は「[設定リファレンス](#設定リファレンス-configuration)」を参照してください。
@@ -136,6 +145,7 @@ COMFY_URL=http://<ComfyUI-HOST>:8188
 > ```bash
 > ./setup.sh --full
 > ```
+>
 
 ### 4. ルールブックのインポート (推奨)
 
@@ -202,16 +212,23 @@ Go Orchestrator と Vite Dev Server を停止します。mlx-serve のプロフ�
 |-----|-----------|------|
 | `DB_PATH` | `data/omni.db` | SQLite データベースのパス |
 | `ADDR` | `:8080` | Go サーバーのリッスンアドレス |
-| `COMFY_URL` | *(空)* | ComfyUI のエンドポイント (空で無効) |
-| `LLM_URL` | `http://127.0.0.1:11441` | チャットモデル (mlx-serve) のエンドポイント。GM / NPC / Support 共通 |
+| `LLM_URL` | `http://127.0.0.1:11441` | チャットモデル (mlx-serve) のエンドポイント。GM / NPC / Support / 要約共通 |
 | `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | 全リクエストに付ける `model`。mlx-serve のプロファイル名と一致させる |
 | `LLM_TIMEOUT_SEC` | `300` | LLM 1 リクエストのタイムアウト (秒) |
 | `STAGE_RETRY_LIMIT` | `2` | 検証 NG の段を再思考させる回数 (0 で再試行なし) |
+| `TURN_TIMEOUT_SEC` | `900` | 1 ターン全体 (全段・再思考込み) の上限 (秒)。超えたターンは開始前に戻る |
+| `APC_TENANT` | `sw25` | `X-APC-Tenant` ヘッダーで送る名前。mlx-vlm のプレフィックスキャッシュを他のアプリと分ける |
+| `IMAGES_URL` | `http://127.0.0.1:11462` | MLX の画像工房 (mlx-studio-web) のエンドポイント |
+| `IMAGE_EVERY` | `3` | 1 ターン目と、以降このターン数ごとにシーン画像を描く。`0` で画像なし |
+| `IMAGES_DIR` | `data/images` | シーン画像の保存先 (`sessions/<id>/` 以下) |
+| `COMFY_URL` | *(空)* | バッチツール `generate_scenarios.py` 用の ComfyUI。ゲーム本体は使わない |
 | `EMBED_URL` | `http://127.0.0.1:11455` | 埋め込みモデル (mlx-serve) のエンドポイント |
 | `EMBED_MODEL_ID` | `bge-m3-q8` | 埋め込みリクエストに付ける `model` |
 | `PERSONAS_DIR` | `data/personas` | NPC ペルソナ YAML ファイルのディレクトリ |
 
 > `LLM_MODEL_ID` / `EMBED_MODEL_ID` は mlx-serve のプロファイルの `model_id` と一致させてください。mlx-vlm は `model` がないと 422 を返し、別の名前を送ると常駐モデルを入れ替えて再ロードします。
+>
+> 空の値は「未設定」として扱われ、既定値が使われます。画像を止めるときは `IMAGES_URL` を空にするのではなく `IMAGE_EVERY=0` にしてください。
 
 ---
 
@@ -299,11 +316,16 @@ go test ./...
 |------|------|
 | `orchestrator/cmd/server/main.go` | エントリーポイント |
 | `orchestrator/pkg/api/handler.go` | HTTP / WebSocket ルーター |
+| `orchestrator/pkg/api/sessions.go` | セッション API、ターンの実行 (排他・中断・やり直し・巻き戻し) |
 | `orchestrator/pkg/game/turn.go` | ターン処理ロジック |
+| `orchestrator/pkg/game/context.go` | 固定の前置き (卓の約束・クエスト・PC・NPC ペルソナ) と直近ターン |
+| `orchestrator/pkg/game/summary.go` | セッションのあらすじ |
+| `orchestrator/pkg/game/checks.go` | 判定 (2d6) |
 | `orchestrator/pkg/game/stage.go` | 段ごとの呼び出し・検証・再思考 |
 | `orchestrator/pkg/game/validate.go` | GM / NPC / Support 出力の検証 |
 | `orchestrator/pkg/llm/client.go` | mlx-serve (OpenAI 互換) クライアント |
-| `orchestrator/pkg/rag/engine.go` | ベクター検索エンジン |
+| `orchestrator/pkg/rag/engine.go` | ルール検索 (ベクター検索 + 用語インデックス `terms.go`) |
+| `orchestrator/pkg/images/studio.go` | MLX 画像工房のクライアント |
 | `orchestrator/pkg/db/schema.sql` | SQLite スキーマ |
 
 ### React フロントエンド
@@ -314,15 +336,22 @@ cd ui
 npm run dev      # Vite 開発サーバー (HMR 付き)
 npm run build    # プロダクションビルド
 npm run lint     # ESLint チェック
+
+OMNI_API=host:port npx vite   # 別のオーケストレーターに向ける (既定 localhost:8080)
 ```
+
+開発サーバーで `?mock=1` を付けて開くと、オーケストレーターなしで作り物のターンを再生します。
 
 主要ディレクトリ:
 
 | パス | 役割 |
 |------|------|
-| `ui/src/views/` | セッション・クエスト・NPC・ルール等のメインビュー |
-| `ui/src/components/` | BattleMap・GMChannel・PlayerInput 等の共通コンポーネント |
-| `ui/src/hooks/useGameSocket.ts` | WebSocket 管理フック |
+| `ui/src/views/` | 開始・セッション (`session/`)・クエスト・パーティ (`party/`)・ルール (`rules/`) の画面 |
+| `ui/src/components/` | ヘッダー・モーダル・HP/MP バー等の共通部品 |
+| `ui/src/hooks/useSessionGame.ts` / `useSessionSocket.ts` | セッションの状態と WebSocket |
+| `ui/src/live/turnReducer.ts` | 進行中のターンの表示 (段・本文・判定) |
+| `ui/src/styles/` | MLX の画面に揃えたテーマ (`theme.css` / `ui.css`) |
+| `ui/src/dev/` | `?mock=1` の作り物の API |
 | `ui/src/types.ts` | TypeScript 型定義 |
 
 ### Python バッチツール
@@ -346,12 +375,14 @@ uv run pytest
 
 | ファイル | 内容 |
 |---------|------|
+| [docs/api.md](docs/api.md) | オーケストレーター API の取り決め (UI との契約) |
 | [docs/spec_ja.md](docs/spec_ja.md) | システム仕様書 (日本語) |
 | [docs/spec_en.md](docs/spec_en.md) | System Specification (English) |
 | [docs/maintenance_ja.md](docs/maintenance_ja.md) | 運用手順書 (日本語) |
 | [docs/maintenance_en.md](docs/maintenance_en.md) | Maintenance Guide (English) |
 | [docs/tools_ja.md](docs/tools_ja.md) | バッチツールリファレンス (日本語) |
 | [docs/tools_en.md](docs/tools_en.md) | Batch Tools Reference (English) |
+| [docs/plan-retune-20261112.md](docs/plan-retune-20261112.md) | MLX 基盤に合わせた再チューニングと UI 改修の計画 |
 | [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
 | [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
 | [docs/verification-apc-20261005.md](docs/verification-apc-20261005.md) | 1 ターン 1 会話化とプレフィックスキャッシュ (APC) の計測 |

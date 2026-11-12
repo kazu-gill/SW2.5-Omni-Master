@@ -8,13 +8,16 @@
 
 ### 1.1 Starting a Session
 
-The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`). Omni-Master's start script does not launch mlx-serve, so start these two profiles first:
+The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`). Omni-Master's start script does not launch mlx-serve, so start these two profiles first, from the MLX dashboard (http://127.0.0.1:11470/) or with the scripts. Only one chat LLM can be resident at a time, so if another chat model is running, switch to Gemma.
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/summary
 pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 embeddings
 pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # check they are up
 ```
+
+- Setting `APC_CHECKPOINT_GUARD_TOKENS=8` and `APC_CHECKPOINT_ENTRIES=4` in the Gemma profile's environment is recommended, so the prefix cache keeps working across stages (details in [mlx-serve-client-notes.md](mlx-serve-client-notes.md))
+- For scene images, also start the MLX image studio mlx-studio-web (:11462). It uses Gemma to pick the composition, so Gemma must be running too. If you do not want images, set `IMAGE_EVERY=0` in `config.env`
 
 Then start Omni-Master (PowerShell 7):
 
@@ -33,8 +36,10 @@ Startup order:
 PIDs are recorded in `.pids`. If `.pids` is left over, the script refuses to start to avoid a double launch (run `Stop-Omni.ps1` first).
 
 Verification:
-- UI: `http://localhost:5173`
-- API: `http://localhost:8080`
+- UI: `http://localhost:5173` (the header shows whether the LLM, embedding model and image studio are up; a banner says what is down)
+- API: `http://localhost:8080` (`curl http://localhost:8080/api/system` returns the same status)
+
+In the UI, create a session with 新しく on the start screen, or open an earlier one from 続きから.
 
 ### 1.2 Stopping a Session
 
@@ -63,14 +68,14 @@ LLM inference logs live on the mlx-serve side (see the mlx-serve README). Each s
 
 ### 2.1 Session Reset (Preserve Rule Data)
 
-Reset between sessions or before a new campaign. NPC definitions and PC sheets are preserved.
+Deletes every session (with its turns, checkpoints and summary) and the quests. NPC definitions and PC sheets are preserved.
 
 ```bash
 ./setup.sh
 ```
 
 Tables cleared:
-- `sessions` (cascades to `npc_sheets`, `session_logs`, `checkpoints`)
+- `sessions` (cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`)
 - `quests`
 
 Tables preserved:
@@ -79,7 +84,7 @@ Tables preserved:
 - `player_characters`
 - `scenarios`, `scenario_images`
 
-After running, session #1 is automatically recreated.
+To delete a single session, do not use `setup.sh`; use the 🗑 button under 続きから on the start screen.
 
 ### 2.2 Full Reset (Erase All Data)
 
@@ -151,6 +156,8 @@ What `--apply` does:
 
 > `ocr_rulebook.py` cuts text mechanically every 500 characters, so do not use it for the rulebook itself. Use it only to add short house-rule or correction text files.
 
+After `--apply`, restart the orchestrator (`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`). The term index (which looks up feats, spells and so on by reading) is built on the first search after startup and is not rebuilt when the DB is changed outside the UI / API.
+
 Verify after import:
 
 ```bash
@@ -206,8 +213,8 @@ uv run ai-agents/optimize_chunks.py \
 
 `build_rulebook.py` leaves out covers, the table of contents, colophons, blank forms and similar noise at import time, so manual disabling is normally unnecessary. Disable a chunk only when you want to keep it out of RAG search.
 
-- In the UI: RULES tab → the chunk's Enable/Disable toggle (`enabled`). Each row shows its part > chapter > heading and book pages
-- The sample scenario 「蛮族を駆逐せよ」 (tag `scenario`) is imported disabled so the GM does not pull the scenario's story into a live session. Enable it in the RULES tab when you play that scenario
+- In the UI: Rules screen → the chunk's Enable/Disable toggle (`enabled`). Each row shows its part > chapter > heading and book pages
+- The sample scenario 「蛮族を駆逐せよ」 (tag `scenario`) is imported disabled so the GM does not pull the scenario's story into a live session. Enable it in the Rules screen when you play that scenario
 
 ```bash
 # With SQL (e.g. enable the whole sample scenario)
@@ -219,10 +226,10 @@ sqlite3 data/omni.db \
 
 ### 3.5 Adding House Rules and Corrections
 
-Add via the RULES screen or directly via the API. Rules added or edited through the UI or API are embedded right away and become searchable immediately. If embedding fails the rule is still saved (the `POST` response has `"embedded": false`); start mlx-serve and run `embed_chunks.py` later.
+Add via the Rules screen or directly via the API. Rules added or edited through the UI or API are embedded right away and become searchable immediately. House rules and corrections get a priority bonus in ranking, so they come above a similar rulebook passage. If embedding fails the rule is still saved (the `POST` response has `"embedded": false`); start mlx-serve and run `embed_chunks.py` later.
 
 ```bash
-# Via UI: RULES tab → "+ ADD" button (top right), or the correction button on a row
+# Via UI: Rules screen → 「＋ ハウスルール・訂正を足す」, or 「訂正を作る」 on a row
 
 # Via API
 curl -X POST http://localhost:8080/api/rules \
@@ -235,6 +242,8 @@ curl -X POST http://localhost:8080/api/rules \
 ```
 
 While a correction or house rule with `overrides_id` set to an original chunk's ID is enabled, the original chunk is left out of RAG search and only the fix is used. Disabling the correction makes the original searchable again.
+
+To see which rules the game will pick, use the search on the Rules screen (`GET /api/rules/search?q=...`, the same search the game uses). Chunks found by term reading show the matched term.
 
 ---
 
@@ -255,27 +264,29 @@ hp: 20
 hp_max: 20
 mp: 30
 mp_max: 30
-persona:
-  personality: Calm and analytical
-  motivation: Unraveling ancient magic
-  speech: Formal, academic phrasing
-  priorities:
-    - Cast spells from range
-  forbidden:
-    - Engage in melee combat
+personality:
+  tone: Calm and analytical
+  speech_style: Formal, academic phrasing
+  values: Unraveling ancient magic
+backstory: A researcher at the mages' guild.
+action_rules:
+  - Cast spells from range
+  - Do not engage in melee combat
 ```
 
-After creating the file, add the NPC via **INFORMATION** tab → "PARTY MEMBERS" → "+ ADD".
+See [spec_en.md](spec_en.md#84-session-memory) for the keys that reach the LLM (`personality`'s `tone` / `speech_style` / `values` / `fears` / `quirks`, `backstory`, `action_rules`, `equipment`, `skills`, …) and `data/personas/example_gard.yaml` for the full format.
+
+After creating the file, open a session, pick the persona on the **Party** screen and press 「仲間に加える」 (up to 3 NPCs per session).
 
 ### 4.2 Updating a Persona
 
-Edit the YAML file directly, then restart the session (`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`).
+A persona YAML is read when the NPC is added to a session and copied into the NPC sheet. Editing the file affects NPCs added afterwards (no restart needed); NPCs already in a session do not change.
 
-Emergency in-session edits (DEV mode):
-1. Enable **DEV MODE** in the UI header
-2. Go to **PARTY** tab → select the NPC
-3. Scroll to the bottom: "DEV — Raw YAML Editor"
-4. Edit YAML → "Save YAML"
+To fix an NPC already in a session:
+1. **Party** screen → select the NPC → 「✎ 編集」. Only the values change; the other YAML keys are kept
+2. To change the keys themselves, turn on **DEV** in the header and use 「YAML を直接編集 (DEV)」 (removing keys loses the persona, so take care)
+
+NPC personas are part of the fixed session prefix, so edits apply from the next turn.
 
 ---
 
@@ -355,7 +366,7 @@ uv run ai-agents/generate_scenarios.py --status
 
 ### 6.1 Creating and Updating PCs
 
-Use **INFORMATION** tab → "PLAYER CHARACTER" → "+ NEW".
+Use the **Party** screen → 「＋ PC を作る」. The sheet summary of the PC set to 「使う」 (one at a time, across all sessions) goes into the fixed session prefix.
 
 PC sheet JSON format (`json_blob` column):
 
@@ -406,29 +417,25 @@ DEV mode is an emergency tool for correcting broken game states. **Use carefully
 
 ### 7.1 Enabling
 
-Click **DEV MODE** in the upper-right corner of the UI header. An amber warning banner appears.
+Click **DEV** at the right end of the UI header. A warning banner appears.
 
-### 7.2 Checkpoint Management (INFORMATION Tab)
+### 7.2 NPC YAML Editor (Party Screen)
 
-All checkpoints are listed with a "✕" delete button when DEV mode is on.
+With DEV on, each NPC's details show a 「YAML を直接編集 (DEV)」 button. Edits are saved to the DB; invalid YAML is rejected with an error message.
+
+### 7.3 Undoing Turns and Deleting Checkpoints
+
+Undoing turns does not need DEV mode; it is done on the Session screen:
+
+- ⟲ このターンの前に戻す (or 「戻す」 on a checkpoint in the side panel): go back to before that turn and delete the later turns. NPC HP/MP and placement go back too
+- ↻ 作り直す / ✎ 入力欄に戻して直す: redo the last turn
+- ⏹ 止める: cancel the running turn (it is as if it never happened)
+
+Only the latest 10 checkpoints per session are kept. There is no UI to delete one, but the API can:
 
 ```bash
-# Also available via API
 curl -X DELETE http://localhost:8080/api/checkpoint/5
 ```
-
-### 7.3 Turn Log Deletion (SESSION Tab)
-
-A red "✕" button appears at the start of each turn. Clicking it deletes all log entries for that turn from both the local view and the database.
-
-```bash
-# Also available via API
-curl -X DELETE "http://localhost:8080/api/session-log/turn/3?session_id=1"
-```
-
-### 7.4 NPC YAML Editor (PARTY Tab)
-
-The "DEV — Raw YAML Editor" section appears at the bottom of each NPC detail page. Edits are validated for syntax before saving. Invalid YAML is rejected with an error message.
 
 ---
 
@@ -492,25 +499,31 @@ uv run ai-agents/embed_chunks.py \
 uv run ai-agents/embed_chunks.py --reembed-all
 ```
 
-### Turn Processing Timeout
+### Turn Processing Timeout / "Turn in Progress"
 
-- UI timeout is 180 seconds (`AbortSignal.timeout(180000)` in `SessionView.tsx`)
-- Timeout per LLM request: `LLM_TIMEOUT_SEC` in `config.env` (default 300 seconds)
-- All stages run serially on one model, so a turn takes GM + each NPC + Support. Re-thinking adds to that (check `stage_attempts`)
-- To favor speed, lower `STAGE_RETRY_LIMIT`
+- Sending a turn returns 202 right away and the UI waits on WebSocket progress events. There is no UI-side timeout
+- Cap per turn: `TURN_TIMEOUT_SEC` in `config.env` (default 900 seconds). A turn that runs over goes back to its start and an error is shown
+- Timeout per LLM request: `LLM_TIMEOUT_SEC` (default 300 seconds)
+- All stages run serially on one model, so a turn takes GM + each NPC + Support. Re-thinking adds to that (check `stage_attempts`), and every few turns a summary update follows
+- To favor speed, lower `STAGE_RETRY_LIMIT`. Also check that the Gemma profile has the recommended APC settings (§1.1)
+- Only one turn runs per session. Sending while one runs (including the summary update) returns 409 「このセッションではターンを処理中です」; wait for it to finish or cancel it with ⏹
 
-### ComfyUI Images Not Generating
+### Scene Images Not Generating
 
 ```bash
-# Test connectivity
-curl http://192.168.1.10:8188/system_stats
+# Status (images.ok)
+curl http://localhost:8080/api/system
 
-# Check config.env
-grep COMFY_URL config.env
+# Check the image studio
+curl http://127.0.0.1:11462/api/health
 
-# To skip image generation and keep the game running
-# Set COMFY_URL= (empty string) in config.env
+# Why it failed
+grep "\[image\]" logs/orchestrator.log
 ```
+
+- Both the image studio (mlx-studio-web) and Gemma (mlx-serve), which picks the composition, must be running
+- Images are drawn only on action turns: turn 1 and turns that are multiples of `IMAGE_EVERY` (default 3)
+- To play without images, set `IMAGE_EVERY=0` in `config.env` (an empty `IMAGES_URL` falls back to the default, so it does not disable them)
 
 ### Database Lock Error
 
@@ -538,12 +551,13 @@ The previous stop did not complete. Run `pwsh scripts/Stop-Omni.ps1`, then start
 
 | Frequency | Task | Command |
 |-----------|------|---------|
-| Before each session | DB reset | `./setup.sh` |
-| Before each session | Review available quests | QUEST BOARD in UI |
+| As needed | Delete sessions you no longer need | 🗑 under 続きから on the start screen |
+| When rebuilding all data | DB reset | `./setup.sh` |
+| Before each session | Review available quests | Quests screen in UI |
 | Monthly | Pre-generate scenarios | `generate_scenarios.py --count 5 --publish-quest` |
 | Monthly | Database backup | `sqlite3 data/omni.db ".backup 'data/backup/omni_backup.db'"` |
 | When rulebook updates | Rebuild chunks | `build_rulebook.py` → `build_rulebook.py --apply` → `embed_chunks.py` |
-| As needed | Add house rules | RULES tab → "+ ADD" |
+| As needed | Add house rules | Rules screen → 「＋ ハウスルール・訂正を足す」 |
 
 ---
 
@@ -555,4 +569,6 @@ The previous stop did not complete. Run `pwsh scripts/Stop-Omni.ps1`, then start
 | Go Orchestrator | 8080 | REST API + WebSocket |
 | mlx-serve `gemma4-31b-it-heretic-4bit-mtp` | 11441 | Chat model shared by GM, NPC and Support (managed by mlx-serve) |
 | mlx-serve `bge-m3-q8` | 11455 | Embedding vector generation (managed by mlx-serve) |
-| ComfyUI | 8188 | Image generation (Windows side) |
+| mlx-studio-web | 11462 | MLX image studio. Scene images (optional, managed on the MLX side) |
+| MLX dashboard | 11470 | Starts and stops mlx-serve profiles |
+| ComfyUI | 8188 | Image generation for `generate_scenarios.py` (Windows side) |

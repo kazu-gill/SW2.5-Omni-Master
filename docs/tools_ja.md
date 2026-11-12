@@ -42,7 +42,7 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 **通常リセット（引数なし）**
 
 削除されるもの:
-- `sessions`（カスケードで `npc_sheets`, `session_logs`, `checkpoints` も削除）
+- `sessions`（すべてのセッション。カスケードで `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries` も削除）
 - `quests`
 
 保持されるもの:
@@ -51,8 +51,6 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 - `player_characters`（PCシート）
 - `scenarios`, `scenario_images`（事前生成シナリオ）
 - `data/personas/*.yaml`（ペルソナ定義）
-
-リセット後、セッション #1 が自動で再作成されます（アプリが `SESSION_ID=1` を前提とするため）。
 
 **フルリセット（--full）**
 
@@ -77,7 +75,7 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 ### 実行例
 
 ```bash
-# 通常のセッション前リセット
+# 全セッションとクエストを消すリセット
 ./setup.sh
 
 # ルールブックも含めて完全初期化
@@ -135,12 +133,14 @@ ADDR=:8080
 # DB パス
 DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
-# ComfyUI URL（画像生成。空文字で無効化）
-COMFY_URL=http://192.168.1.10:8188
+# シーン画像（MLX の画像工房 mlx-studio-web）。IMAGE_EVERY=0 で無効化
+IMAGES_URL=http://127.0.0.1:11462
+IMAGE_EVERY=3
 
-# チャットモデル（GM / NPC / Support 共通、mlx-serve）
+# チャットモデル（GM / NPC / Support / 要約共通、mlx-serve）
 LLM_URL=http://127.0.0.1:11441
 LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+APC_TENANT=sw25
 
 # 埋め込み（RAG、mlx-serve）
 EMBED_URL=http://127.0.0.1:11455
@@ -222,21 +222,21 @@ uv run ai-agents/build_rulebook.py [オプション]
 3. 新しいチャンクを追加（`embedding` は NULL）
 4. ハウスルール・訂正の行は残す。削除対象の行を `overrides_id` で参照している訂正・ハウスルールがあれば、何も変更せずに終了する（UI で参照先を付け替えてから再実行）
 
-続けて `embed_chunks.py` で埋め込みを作ります。
+続けて `embed_chunks.py` で埋め込みを作り、オーケストレーターが動いていれば再起動します（用語インデックスは起動後の最初の検索で作られ、DB を直接書き換えても作り直されないため）。
 
 ### チャンクの作り方
 
 - `## ページ N` を PDF のページ区切りとして読む。PDF 1 ページは本の見開き 2 ページで、本のページは `2N-4` と `2N-3`
 - 目次（PDF 3〜4 ページ）を読み、本のページから部・章・項目を引く
 - 見出しと段落で区切り、文の途中では切らない（目安 600 文字。900 文字を超える段落は「。」で分割。表は 900 文字ごとに行単位で分割し、見出し行を繰り返す）
-- 「漢字（かな）」形式のルビを除去し、全角英数字を半角にする
+- 「漢字（かな）」形式のルビと、かなの語に同じ読みを重ねた「かな（かな）」を除去し、全角英数字を半角にする
 - 除外するもの: ページ番号だけの行、目次のリーダー行、イラストのクレジット、©GROUP SNE の行、チェック欄、誌面のレイアウト要素（サイドバー・ナビゲーション・フッター・能力チャートなど）、空欄の記入用表（本文行の半分以上が空、または 1 列目のラベルだけ）、サンプルキャラクターの記入済みシート（解説文は残す）、索引・デザイナーズノート・スタッフリストの章
 - 用語集のような短い見出し項目の連続は、`【見出し】` を付けて 1 チャンクにまとめる。短い末尾は前のチャンクに、短い導入は次のチャンクに付ける。同一テキストは重複を除く
 - 各チャンクに付ける値:
   - `section`: 「部 > 章 > 項目 > 見出し階層」
   - `page_from` / `page_to`: 本のページ
   - `tag`: `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario`（目次と対応しない部分は `general`）
-- サンプルシナリオ「蛮族を駆逐せよ」の本文は tag `scenario`・`enabled=0` で取り込む（GM がシナリオの筋書きを通常のセッションに持ち込まないため）。UI の RULES 画面で有効にできる
+- サンプルシナリオ「蛮族を駆逐せよ」の本文は tag `scenario`・`enabled=0` で取り込む（GM がシナリオの筋書きを通常のセッションに持ち込まないため）。UI のルール画面で有効にできる
 
 ### 実行例
 
@@ -282,7 +282,7 @@ uv run ai-agents/ocr_rulebook.py <ファイルパス> [オプション]
 
 ### ソースタイプと優先度
 
-RAG 検索では、類似度が同じ場合に優先度の高いチャンクが優先されます。
+RAG 検索では、類似度に優先度のボーナス（優先度 × 0.0025）を足して並べます。わずかに類似度の高いルールブック原文より、ハウスルール・訂正が上に来ます。
 
 | ソースタイプ | 優先度 | 用途 |
 |-----------|--------|------|
@@ -650,7 +650,7 @@ uv run ai-agents/generate_scenarios.py \
 - mlx-serve のチャットモデル（デフォルト 11441、`/v1/chat/completions`）が稼働している必要があります（テキスト生成に使用）
 - ComfyUI を使用する場合、Windows 側の ComfyUI が起動していることを確認してください
 - `--no-images` を付けると ComfyUI なしで実行できます
-- `--publish-quest` で生成されたシナリオは UI の QUEST BOARD に即座に表示されます
+- `--publish-quest` で生成されたシナリオは UI のクエスト画面に即座に表示されます
 
 ---
 
@@ -681,14 +681,21 @@ uv sync
 ADDR=:8080
 DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
-# ComfyUI（空文字で無効化）
+# シーン画像（MLX の画像工房 mlx-studio-web）。IMAGE_EVERY=0 で無効化
+IMAGES_URL=http://127.0.0.1:11462
+IMAGE_EVERY=3
+IMAGES_DIR=/Users/kf/AI/SW2.5-Omni-Master/data/images
+
+# ComfyUI（ゲーム本体は使わない。generate_scenarios.py は --comfy-url か環境変数 COMFY_URL を読む）
 COMFY_URL=http://192.168.1.10:8188
 
-# チャットモデル（mlx-serve、GM / NPC / Support 共通）
+# チャットモデル（mlx-serve、GM / NPC / Support / 要約共通）
 LLM_URL=http://127.0.0.1:11441
 LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
-LLM_TIMEOUT_SEC=300
+LLM_TIMEOUT_SEC=300          # 1 リクエストごと
 STAGE_RETRY_LIMIT=2
+TURN_TIMEOUT_SEC=900         # 1 ターン全体
+APC_TENANT=sw25
 
 # 埋め込み（mlx-serve、RAG）
 EMBED_URL=http://127.0.0.1:11455

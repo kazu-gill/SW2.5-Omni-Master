@@ -8,13 +8,16 @@
 
 ### 1.1 セッション開始
 
-LLM は mlx-serve（`/Users/kf/AI/MLX`）が提供します。Omni-Master の起動スクリプトは mlx-serve を起動しないため、先に次の 2 プロファイルを起動しておきます。
+LLM は mlx-serve（`/Users/kf/AI/MLX`）が提供します。Omni-Master の起動スクリプトは mlx-serve を起動しないため、先に次の 2 プロファイルを起動しておきます。MLX ダッシュボード（http://127.0.0.1:11470/）から起動するか、スクリプトを使います。チャット用の LLM は同時に 1 本しか常駐できないので、ほかのチャットモデルが動いていれば Gemma に切り替えます。
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support
+pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/要約
 pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 埋め込み
 pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # 稼働確認
 ```
+
+- Gemma プロファイルの起動環境には `APC_CHECKPOINT_GUARD_TOKENS=8` と `APC_CHECKPOINT_ENTRIES=4` を設定することを推奨します（プレフィックスキャッシュが段の切り替えで効くようにするため。詳細は [mlx-serve-client-notes.md](mlx-serve-client-notes.md)）
+- シーン画像を使う場合は、MLX の画像工房 mlx-studio-web（:11462）も起動しておきます。構図を決めるのに Gemma を使うため、Gemma も起動している必要があります。使わない場合は `config.env` で `IMAGE_EVERY=0` にします
 
 続いて Omni-Master を起動します（PowerShell 7）。
 
@@ -33,8 +36,10 @@ pwsh scripts/Start-Omni.ps1           # ログを追従する場合は -Follow
 PID は `.pids` に記録されます。`.pids` が残っている場合は二重起動を防ぐため起動しません（先に `Stop-Omni.ps1` を実行）。
 
 起動確認:
-- UI: `http://localhost:5173`
-- API: `http://localhost:8080`
+- UI: `http://localhost:5173`（ヘッダーに LLM・埋め込み・画像の稼働状態が出ます。止まっているものがあればバナーで知らせます）
+- API: `http://localhost:8080`（`curl http://localhost:8080/api/system` で同じ稼働状態を確認できます）
+
+UI を開いたら、開始画面の「新しく」でセッションを作るか、「続きから」で前のセッションを開きます。
 
 ### 1.2 セッション終了
 
@@ -63,14 +68,14 @@ LLM の推論ログは mlx-serve 側にあります（mlx-serve の README を�
 
 ### 2.1 セッションリセット（ルールデータ保持）
 
-プレイ開始前やセッション間のリセット。NPC 定義・PC シートは保持。
+すべてのセッション（ターン・チェックポイント・あらすじを含む）とクエストを消すリセット。NPC 定義・PC シートは保持。
 
 ```bash
 ./setup.sh
 ```
 
 削除対象:
-- `sessions`（カスケードで `npc_sheets`, `session_logs`, `checkpoints` も削除）
+- `sessions`（カスケードで `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries` も削除）
 - `quests`
 
 保持されるもの:
@@ -79,7 +84,7 @@ LLM の推論ログは mlx-serve 側にあります（mlx-serve の README を�
 - `player_characters`
 - `scenarios`, `scenario_images`
 
-実行後、セッション #1 が自動再作成されます。
+1 つのセッションだけを消すときは、`setup.sh` を使わずに開始画面の「続きから」の 🗑 で削除します。
 
 ### 2.2 フルリセット（全データ消去）
 
@@ -151,6 +156,8 @@ uv run ai-agents/embed_chunks.py
 
 > `ocr_rulebook.py` は 500 文字で機械的に切るため、ルールブック本体には使いません。短いハウスルール集・訂正集のテキストを追加するときだけ使います。
 
+`--apply` の後はオーケストレーターを再起動してください（`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`）。用語インデックス（特技・魔法などを読みで引く索引）は起動後の最初の検索で作られ、UI / API 以外での DB の書き換えでは作り直されません。
+
 インポート後の確認:
 
 ```bash
@@ -206,8 +213,8 @@ uv run ai-agents/optimize_chunks.py \
 
 表紙・目次・奥付・記入用シートなどのノイズは `build_rulebook.py` が取り込み時に除外するため、手作業での無効化は通常不要です。特定のチャンクを RAG 検索から外したいときだけ無効化します。
 
-- UI の RULES タブ → 対象チャンクの「有効 / 無効」トグル（`enabled`）。各行には部 > 章 > 見出しと本のページが表示されます
-- サンプルシナリオ「蛮族を駆逐せよ」の本文（tag `scenario`）は、GM がシナリオの筋書きをセッションに持ち込まないよう、無効の状態で取り込まれます。このシナリオを遊ぶときは RULES タブで有効にします
+- UI のルール画面 → 対象チャンクの「有効 / 無効」トグル（`enabled`）。各行には部 > 章 > 見出しと本のページが表示されます
+- サンプルシナリオ「蛮族を駆逐せよ」の本文（tag `scenario`）は、GM がシナリオの筋書きをセッションに持ち込まないよう、無効の状態で取り込まれます。このシナリオを遊ぶときはルール画面で有効にします
 
 ```bash
 # SQL で操作する場合（例: サンプルシナリオをまとめて有効化）
@@ -219,10 +226,10 @@ sqlite3 data/omni.db \
 
 ### 3.5 ハウスルール・訂正を追加する
 
-RULES 画面（UI）から追加するか、直接 API を呼び出します。UI / API で追加・編集したルールはその場で埋め込まれ、すぐに RAG 検索の対象になります。埋め込みに失敗した場合もルールは保存されるので（`POST` のレスポンスが `"embedded": false`）、mlx-serve を起動してから `embed_chunks.py` を実行してください。
+ルール画面（UI）から追加するか、直接 API を呼び出します。UI / API で追加・編集したルールはその場で埋め込まれ、すぐに RAG 検索の対象になります。ハウスルール・訂正は検索の順位で優先度のボーナスを受けるため、似た内容のルールブック原文より上に来ます。埋め込みに失敗した場合もルールは保存されるので（`POST` のレスポンスが `"embedded": false`）、mlx-serve を起動してから `embed_chunks.py` を実行してください。
 
 ```bash
-# UI を使う場合: RULES タブ → 右上の「+ 追加」ボタン、または各行の訂正ボタン
+# UI を使う場合: ルール画面 →「＋ ハウスルール・訂正を足す」、または各行の「訂正を作る」
 
 # API を使う場合
 curl -X POST http://localhost:8080/api/rules \
@@ -235,6 +242,8 @@ curl -X POST http://localhost:8080/api/rules \
 ```
 
 `overrides_id` に元チャンクの ID を指定した訂正・ハウスルールが有効な間は、元チャンクは RAG 検索から外れ、訂正側だけが使われます。訂正を無効にすると元チャンクが再び検索対象になります。
+
+ゲーム中にどのルールが引かれるかは、ルール画面の検索（`GET /api/rules/search?q=...`、ゲーム中と同じ検索）で確かめられます。用語の読みで当たったチャンクには、当たった用語が表示されます。
 
 ---
 
@@ -255,27 +264,29 @@ hp: 20
 hp_max: 20
 mp: 30
 mp_max: 30
-persona:
-  personality: 冷静で分析的
-  motivation: 古代魔法の解明
-  speech: 敬語・学術的な言い回し
-  priorities:
-    - 遠距離から魔法攻撃を行う
-  forbidden:
-    - 近接戦闘に参加する
+personality:
+  tone: 冷静で分析的
+  speech_style: 敬語・学術的な言い回し
+  values: 古代魔法の解明
+backstory: 魔術師ギルドの研究員。
+action_rules:
+  - 遠距離から魔法攻撃を行う
+  - 近接戦闘には参加しない
 ```
 
-追加後、UI の INFORMATION タブ > 「PARTY MEMBERS」>「+ ADD」から追加できます。
+LLM に渡るキー（`personality` の `tone` / `speech_style` / `values` / `fears` / `quirks`、`backstory`、`action_rules`、`equipment`、`skills` など）は [spec_ja.md](spec_ja.md#84-セッションの記憶) を、書式の全体は `data/personas/example_gard.yaml` を参照してください。
+
+追加後、セッションを開いた状態で UI のパーティ画面からペルソナを選び「仲間に加える」で追加できます（1 セッション 3 体まで）。
 
 ### 4.2 ペルソナを更新する
 
-YAML ファイルを直接編集した後、セッションを再起動してください（`pwsh scripts/Stop-Omni.ps1 && pwsh scripts/Start-Omni.ps1`）。
+ペルソナ YAML はセッションに加えるときに読み込まれ、NPC シートに写されます。ファイルを編集すると、その後に加えた NPC に反映されます（再起動は不要）。すでにセッションにいる NPC は変わりません。
 
-セッション中の緊急修正（DEV モード）:
-1. UI ヘッダーの「DEV MODE」をオン
-2. PARTY タブ → 対象 NPC を選択
-3. ページ最下部の「DEV — Raw YAML 直接編集」セクションを展開
-4. YAML を修正 → 「YAML を保存」
+セッションにいる NPC を直すとき:
+1. パーティ画面 → 対象 NPC を選択 →「✎ 編集」。値だけを書き換え、YAML のほかのキーは保たれます
+2. キーそのものを直すときは、ヘッダーの「DEV」をオンにして「YAML を直接編集 (DEV)」を使います（キーを消すとペルソナが失われるので注意）
+
+NPC のペルソナはセッション固定の前置きに入るため、編集すると次のターンから反映されます。
 
 ---
 
@@ -355,7 +366,7 @@ uv run ai-agents/generate_scenarios.py --status
 
 ### 6.1 PC を作成・更新する
 
-UI の INFORMATION タブ > 「PLAYER CHARACTER」>「+ NEW」から作成します。
+UI のパーティ画面 →「＋ PC を作る」から作成します。「使う」にした PC（全体で 1 人）のシートの要点が、セッション固定の前置きに入ります。
 
 PCシートの JSON 形式（`json_blob` カラム）:
 
@@ -406,29 +417,25 @@ DEV モードはゲームが正常進行しない緊急時の根本対処用ツ�
 
 ### 7.1 有効化
 
-UI ヘッダー右端の「DEV MODE」ボタンをクリック。琥珀色のバナーが表示されます。
+UI ヘッダー右端の「DEV」ボタンをクリック。注意のバナーが表示されます。
 
-### 7.2 チェックポイント管理（INFORMATION タブ）
+### 7.2 NPC YAML 直接編集（パーティ画面）
 
-DEV ON 時は全チェックポイントが一覧表示され、各行に「✕」削除ボタンが現れます。
+DEV ON 時、各 NPC の詳細に「YAML を直接編集 (DEV)」ボタンが表示されます。YAML を編集して保存するとDBに反映されます。構文エラーがある場合は保存が拒否されます。
+
+### 7.3 ターンを取り消す・チェックポイントを消す
+
+ターンの取り消しは DEV モードを使わず、セッション画面で行います。
+
+- ⟲ このターンの前に戻す（またはサイドパネルのチェックポイントの「戻す」）: そのターンの開始前の状態に戻し、以降のターンを消す。NPC の HP/MP・配置も戻る
+- ↻ 作り直す / ✎ 入力欄に戻して直す: 最後のターンをやり直す
+- ⏹ 止める: 実行中のターンを中断する（ターンは無かったことになる）
+
+チェックポイントはセッションごとに最新 10 件だけ残ります。個別に消す UI はありませんが、API で削除できます。
 
 ```bash
-# API でも削除可能
 curl -X DELETE http://localhost:8080/api/checkpoint/5
 ```
-
-### 7.3 ターンログ削除（SESSION タブ）
-
-DEV ON 時、各ターンの先頭に赤い「✕」ボタンが表示されます。クリックするとそのターンの全ログを削除します（ローカル表示と DB 両方）。
-
-```bash
-# API でも削除可能
-curl -X DELETE "http://localhost:8080/api/session-log/turn/3?session_id=1"
-```
-
-### 7.4 NPC YAML 直接編集（PARTY タブ）
-
-DEV ON 時、各 NPC の詳細ページ最下部に「DEV — Raw YAML 直接編集」セクションが表示されます。YAML を編集して保存するとDBに反映されます。構文エラーがある場合は保存が拒否されます。
 
 ---
 
@@ -492,25 +499,31 @@ uv run ai-agents/embed_chunks.py \
 uv run ai-agents/embed_chunks.py --reembed-all
 ```
 
-### ターン処理がタイムアウトする
+### ターン処理がタイムアウトする / 「処理中です」と言われる
 
-- UI 側タイムアウト: 180秒（`SessionView.tsx` の `AbortSignal.timeout(180000)`）
-- LLM 1 リクエストのタイムアウト: `config.env` の `LLM_TIMEOUT_SEC`（既定 300秒）
-- 全段が 1 モデルで直列に動くため、ターン時間は GM + NPC 数 + Support の合計になります。再思考が起きるとその分長くなります（`stage_attempts` で確認）
-- 時間を優先する場合は `STAGE_RETRY_LIMIT` を減らします
+- ターンの送信はすぐ 202 が返り、UI は WebSocket の進行イベントで待ちます。UI 側のタイムアウトはありません
+- 1 ターン全体の上限: `config.env` の `TURN_TIMEOUT_SEC`（既定 900秒）。超えるとターンは開始前の状態に戻り、エラーが表示されます
+- LLM 1 リクエストのタイムアウト: `LLM_TIMEOUT_SEC`（既定 300秒）
+- 全段が 1 モデルで直列に動くため、ターン時間は GM + NPC 数 + Support の合計になります。再思考が起きるとその分長くなります（`stage_attempts` で確認）。数ターンごとにあらすじの更新が続きます
+- 時間を優先する場合は `STAGE_RETRY_LIMIT` を減らします。Gemma プロファイルに推奨の APC 設定（§1.1）が入っているかも確認します
+- 1 セッションで同時に走るターンは 1 つです。実行中（あらすじの更新中を含む）に送ると 409「このセッションではターンを処理中です」になります。終わるまで待つか、⏹ 止めるで中断します
 
-### ComfyUI 画像が生成されない
+### シーン画像が生成されない
 
 ```bash
-# 接続確認
-curl http://192.168.1.10:8188/system_stats
+# 稼働状態（images.ok）を確認
+curl http://localhost:8080/api/system
 
-# config.env の COMFY_URL を確認
-grep COMFY_URL config.env
+# 画像工房の確認
+curl http://127.0.0.1:11462/api/health
 
-# 画像生成のみスキップしてゲーム継続したい場合
-# COMFY_URL= （空文字に設定）
+# 失敗の理由
+grep "\[image\]" logs/orchestrator.log
 ```
+
+- 画像工房（mlx-studio-web）と、構図を決める Gemma（mlx-serve）の両方が起動している必要があります
+- 描くのは行動ターンの 1 ターン目と、`IMAGE_EVERY`（既定 3）の倍数のターンだけです
+- 画像なしで進めたい場合は `config.env` で `IMAGE_EVERY=0` にします（`IMAGES_URL` を空にしても既定値に戻るため無効になりません）
 
 ### DB ロックエラー
 
@@ -538,12 +551,13 @@ pwsh scripts/Start-Omni.ps1
 
 | 頻度 | 作業 | コマンド |
 |------|------|---------|
-| セッション前 | DB リセット | `./setup.sh` |
-| セッション前 | 最新クエスト確認 | UI の QUEST BOARD |
+| 随時 | 不要なセッションの削除 | UI の開始画面「続きから」の 🗑 |
+| 全データの作り直し時 | DB リセット | `./setup.sh` |
+| セッション前 | 最新クエスト確認 | UI のクエスト画面 |
 | 月1回 | シナリオ事前生成 | `generate_scenarios.py --count 5 --publish-quest` |
 | 月1回 | DB バックアップ | `sqlite3 data/omni.db ".backup 'data/backup/omni_backup.db'"` |
 | ルールブック更新時 | チャンク再構築 | `build_rulebook.py` → `build_rulebook.py --apply` → `embed_chunks.py` |
-| 随時 | ハウスルール追加 | RULES タブ → 「+ 追加」 |
+| 随時 | ハウスルール追加 | ルール画面 →「＋ ハウスルール・訂正を足す」 |
 
 ---
 
@@ -555,4 +569,6 @@ pwsh scripts/Start-Omni.ps1
 | Go Orchestrator | 8080 | REST API + WebSocket |
 | mlx-serve `gemma4-31b-it-heretic-4bit-mtp` | 11441 | GM・NPC・サポート共通のチャットモデル（mlx-serve が管理） |
 | mlx-serve `bge-m3-q8` | 11455 | ベクトル埋め込み生成（mlx-serve が管理） |
-| ComfyUI | 8188 | 画像生成（Windows 側） |
+| mlx-studio-web | 11462 | MLX の画像工房。シーン画像（オプション、MLX 側が管理） |
+| MLX ダッシュボード | 11470 | mlx-serve のプロファイルの起動・停止 |
+| ComfyUI | 8188 | `generate_scenarios.py` の画像生成（Windows 側） |

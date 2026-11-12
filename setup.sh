@@ -97,8 +97,7 @@ DELETE FROM quests;
 
 $([ "$FULL_RESET" -eq 1 ] && echo "-- ルールデータ（--full 指定時のみ）" && echo "DELETE FROM rag_chunks;")
 
--- session #1 を再作成（アプリが SESSION_ID = 1 を前提とする）
-INSERT INTO sessions (id, quest_id) VALUES (1, '');
+-- セッションは画面 (続きから / 新しく) で作る
 SQL
 
 # ── 結果表示 ──────────────────────────────────────────────────────────────────
@@ -119,13 +118,13 @@ EOF
 echo ""
 RULEBOOK="$ROOT/data/rulebook/swordworld2.5_rulebook1.md"
 if [ -f "$RULEBOOK" ]; then
-    echo "[info] ルールブックが見つかりました。以下のコマンドでインポートできます:"
-    echo "       uv run $ROOT/ai-agents/ocr_rulebook.py \\"
-    echo "           $RULEBOOK \\"
-    echo "           --db $DB_PATH"
+    echo "[info] ルールブックが見つかりました。誤字を直してから取り込み、埋め込みを作ります:"
+    echo "       uv run $ROOT/ai-agents/fix_rulebook_ocr.py --apply"
+    echo "       uv run $ROOT/ai-agents/build_rulebook.py --db $DB_PATH --apply"
+    echo "       uv run $ROOT/ai-agents/embed_chunks.py --db $DB_PATH"
 else
-    echo "[info] ルールブックのインポート:"
-    echo "       uv run $ROOT/ai-agents/ocr_rulebook.py <file.md> --db $DB_PATH"
+    echo "[info] ルールブック (data/rulebook/swordworld2.5_rulebook1.md) を置いてから:"
+    echo "       uv run $ROOT/ai-agents/build_rulebook.py --db $DB_PATH --apply"
 fi
 
 # ── git フックのインストール ──────────────────────────────────────────────────

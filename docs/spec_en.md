@@ -6,18 +6,22 @@
 
 ## 1. System Overview
 
-**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". A single local chat LLM handles the Game Master (GM), NPC and Support (resource validation) roles one after another, generating responses to player action declarations. The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform; Omni-Master itself does not launch any inference process. Rule consistency is maintained by retrieving relevant rulebook passages via vector search (RAG), and optional integration with ComfyUI enables automated scene image generation.
+**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". A single local chat LLM handles the Game Master (GM), NPC and Support (resource validation) roles one after another, generating responses to player action declarations. The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform; Omni-Master itself does not launch any inference process. Rule consistency is maintained by retrieving relevant rulebook passages via vector search and a term index (RAG), and optional integration with the MLX image studio (mlx-studio-web) enables automated scene image generation.
+
+The contract between the UI and the orchestrator (endpoints, WebSocket events, types) is [api.md](api.md). This document describes the processing behind it.
 
 ### Key Features
 
 | Feature | Description |
 |---------|-------------|
-| **Autonomous GM** | LLM acts as GM, generating situational narration and rulings for each player action |
-| **NPC Multi-Agent** | NPCs take turns on the same model, each with an individual personality. Every stage's output is validated and re-thought if invalid |
-| **RAG Rule Lookup** | Imported rulebook is searched by embedding vector and injected into LLM prompts |
-| **Image Generation** | ComfyUI (Stable Diffusion) generates scene images and NPC portraits |
-| **Real-time UI** | WebSocket broadcasts turn results to all connected clients |
-| **Checkpoints** | Session state is auto-saved and restorable (up to 10 per session) |
+| **Autonomous GM** | LLM acts as GM, generating situational narration and check requests for each player action |
+| **NPC Multi-Agent** | NPCs take turns on the same model, each following its persona (personality, speech, backstory, action rules). Every stage's output is validated and re-thought if invalid |
+| **Session Memory** | The LLM gets a fixed per-session prefix (table rules, accepted quest, PC, NPC personas), a running summary and the last 2 turns word for word |
+| **Checks** | The GM and NPCs only state the check, base value and target; the code rolls 2d6 |
+| **RAG Rule Lookup** | Imported rulebook is searched by embedding vector and by term reading, and injected into LLM prompts |
+| **Image Generation** | The MLX image studio (mlx-studio-web) draws a scene image every few turns |
+| **Real-time UI** | WebSocket streams each stage's progress and the GM / NPC text as it is generated |
+| **Session Management** | Create and delete multiple sessions; cancel, redo, and restore to before any turn (the latest 10 checkpoints are kept) |
 | **Batch Maintenance** | Rulebook chunking, embedding generation and scenario pre-generation run offline |
 
 ---
@@ -27,7 +31,7 @@
 ```
 ┌──────────────────────────────────────────────────────┐
 │                 Browser (React UI)                   │
-│  INFORMATION │ SESSION │ QUEST BOARD │ PARTY │ RULES │
+│        Session │ Quests │ Party │ Rules              │
 └──────────────────────┬───────────────────────────────┘
                        │ HTTP / WebSocket
 ┌──────────────────────▼──────────────────────────────┐
@@ -43,21 +47,22 @@
 │  ┌─────────────────────────────┐ ┌────────────────┐ │
 │  │ Chat LLM :11441              │ │ Embed :11455   │ │
 │  │ gemma4-31b-it-heretic-4bit-  │ │ bge-m3-q8      │ │
-│  │ mtp (GM / NPC / Support)     │ │ (1024-dim)     │ │
+│  │ mtp (GM / NPC / Support /    │ │ (1024-dim)     │ │
+│  │ summary)                     │ │                │ │
 │  └─────────────────────────────┘ └────────────────┘ │
+│  ┌─────────────────────────────────────────────────┐ │
+│  │ mlx-studio-web :11462 (image studio, optional)  │ │
+│  │ Gemma picks the composition, ComfyUI draws      │ │
+│  └─────────────────────────────────────────────────┘ │
 └─────────────────────────────────────────────────────┘
         ▲
         │ RAG Context
   ┌─────┴──────────────────────┐
   │     SQLite DB (omni.db)    │
   │  rag_chunks / sessions /   │
-  │  npc_sheets / quests / ... │
+  │  npc_sheets / turn_results │
+  │  / session_summaries / ... │
   └────────────────────────────┘
-
-  ┌──────────────────────────┐
-  │  ComfyUI (Windows host)  │  ← Optional
-  │  http://192.168.x.x:8188 │
-  └──────────────────────────┘
 
   ┌──────────────────────────┐
   │  Python Batch Tools      │  ← Maintenance only
@@ -77,7 +82,7 @@
 | **LLM Runtime** | mlx-serve (separate repo) | Local LLM inference (OpenAI-compatible API) |
 | **Chat Model** | Gemma 4 31B-it (`gemma4-31b-it-heretic-4bit-mtp`, mlx-vlm + MTP) | GM, NPC and Support roles, run serially on one model |
 | **Embed Model** | BGE-M3 (`bge-m3-q8`, 1024-dim) | RAG vector generation |
-| **Image Gen** | ComfyUI + Stable Diffusion | Scene and portrait images |
+| **Image Gen** | mlx-studio-web (MLX image studio) | Scene images. The batch tool's scenario images use ComfyUI directly |
 | **Batch Tools** | Python 3.14+ + uv | Rulebook processing, scenario generation |
 
 ---
@@ -89,7 +94,10 @@ sw25-omni-master/
 ├── orchestrator/               # Go backend
 │   ├── cmd/server/main.go      # Entry point
 │   └── pkg/
-│       ├── api/handler.go      # HTTP routes and WebSocket
+│       ├── api/
+│       │   ├── handler.go      # HTTP routes and WebSocket
+│       │   ├── sessions.go     # Session API, running turns (one at a time, cancel, redo, restore)
+│       │   └── extras.go       # System status, rule search, scene images
 │       ├── config/config.go    # Configuration loader
 │       ├── db/                 # SQLite access layer
 │       │   ├── schema.sql      # Table definitions
@@ -104,15 +112,22 @@ sw25-omni-master/
 │       │   ├── types.go        # Data type definitions
 │       │   ├── stage.go        # Per-stage call, validation and re-thinking
 │       │   ├── validate.go     # GM / NPC / Support output validation
-│       │   └── comfyui.go      # Image generation client
-│       ├── llm/                # LLM HTTP client (for mlx-serve)
-│       └── rag/                # Vector search engine
+│       │   ├── context.go      # Fixed session prefix and recent turns
+│       │   ├── summary.go      # Session summary
+│       │   ├── checks.go       # Checks (2d6)
+│       │   └── transcript.go   # One turn = one conversation
+│       ├── images/studio.go    # MLX image studio client
+│       ├── llm/                # LLM HTTP client (for mlx-serve, SSE streaming)
+│       └── rag/                # Vector search engine and term index (terms.go)
 ├── ui/                         # React frontend
 │   └── src/
 │       ├── App.tsx             # Root, navigation
-│       ├── views/              # Screen components
-│       ├── hooks/              # useGameSocket.ts
-│       └── utils/              # questEligibility.ts
+│       ├── views/              # Start, session/, quests, party/, rules/
+│       ├── hooks/              # useSessionGame.ts, useSessionSocket.ts, useSystemStatus.ts
+│       ├── live/turnReducer.ts # Display of the running turn
+│       ├── styles/             # theme.css, ui.css (shared look with the MLX screens)
+│       ├── dev/                # Mock API for ?mock=1
+│       └── utils/              # npcYaml.ts, questEligibility.ts, etc.
 ├── ai-agents/                  # Python batch tools
 │   ├── mlx_client.py           # Shared mlx-serve helpers
 │   ├── build_rulebook.py       # Rulebook (re)builder
@@ -129,7 +144,8 @@ sw25-omni-master/
 │   ├── rulebook/               # Source rulebook files
 │   └── images/                 # Generated images
 │       ├── backgrounds/        # Shared background images
-│       └── scenarios/{id}/     # Per-scenario images
+│       ├── scenarios/{id}/     # Per-scenario images
+│       └── sessions/{id}/      # Session scene images (IMAGES_DIR)
 ├── docs/                       # Documentation
 ├── logs/                       # Service logs
 ├── config.env                  # Configuration file
@@ -149,28 +165,36 @@ Values in `config.env` are loaded by `scripts/Start-Omni.ps1` and the Go server 
 |-----|---------|-------------|
 | `DB_PATH` | `data/omni.db` | SQLite database file path |
 | `ADDR` | `:8080` | Go server listen address |
-| `COMFY_URL` | `""` (empty = disabled) | ComfyUI endpoint URL |
-| `LLM_URL` | `http://127.0.0.1:11441` | Chat model endpoint (mlx-serve profile), shared by GM, NPC and Support |
+| `LLM_URL` | `http://127.0.0.1:11441` | Chat model endpoint (mlx-serve profile), shared by GM, NPC, Support and the summary |
 | `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | `model` sent with every request. Must match the mlx-serve profile name |
 | `LLM_TIMEOUT_SEC` | `300` | Timeout per LLM request (seconds) |
 | `STAGE_RETRY_LIMIT` | `2` | How many times a stage is re-thought after its output fails validation (0 = no retry) |
+| `TURN_TIMEOUT_SEC` | `900` | Cap on a whole turn (all stages and re-thinks), in seconds. A turn that runs over is rolled back to its start |
+| `APC_TENANT` | `sw25` | Sent as the `X-APC-Tenant` header on chat requests, keeping mlx-vlm's prefix cache apart from other apps |
+| `IMAGES_URL` | `http://127.0.0.1:11462` | MLX image studio (mlx-studio-web) endpoint |
+| `IMAGE_EVERY` | `3` | Draw a scene image on turn 1 and every N-th turn after. `0` = no images |
+| `IMAGES_DIR` | `data/images` | Where scene images are saved (under `sessions/<id>/`) |
+| `COMFY_URL` | `""` | ComfyUI used by `generate_scenarios.py`. Not used by the game itself |
 | `EMBED_URL` | `http://127.0.0.1:11455` | Embedding model endpoint (mlx-serve profile) |
 | `EMBED_MODEL_ID` | `bge-m3-q8` | `model` sent with embedding requests |
 | `PERSONAS_DIR` | `data/personas` | Directory containing NPC persona YAML files |
 
 > `LLM_MODEL_ID` / `EMBED_MODEL_ID` must match the `model_id` of the mlx-serve profile. mlx-vlm returns 422 when `model` is missing, and reloads the resident model when a different name is sent.
+>
+> An empty value (in the environment or config.env) counts as unset and the default is used. To turn images off, set `IMAGE_EVERY=0` rather than emptying `IMAGES_URL`.
 
 ---
 
 ## 6. Database Schema
 
 ### 6.1 sessions
-Session-level metadata. Currently assumes session ID=1.
+Session-level metadata. Sessions are created from the UI (`POST /api/sessions`); there can be any number of them. Deleting a session cascades to its NPC sheets, logs, checkpoints, turn results and summary.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `id` | INTEGER PK | Session ID |
-| `quest_id` | TEXT | Active quest ID |
+| `title` | TEXT | Session name (the UI shows "セッション N" when empty) |
+| `quest_id` | TEXT | Accepted quest ID (`quests.id` as text; empty = none) |
 | `created_at` / `updated_at` | DATETIME | Timestamps |
 
 ### 6.2 npc_sheets
@@ -182,7 +206,8 @@ Real-time state of NPCs active in the session.
 | `session_id` | INTEGER FK | Session ID |
 | `name` | TEXT | NPC name (unique per session) |
 | `hp` / `mp` | INTEGER | Current HP/MP |
-| `position_x` / `position_y` | INTEGER | Battle map coordinates (Y: 0-2=enemy / 3-5=front / 6-7=party rear) |
+| `hp_max` / `mp_max` | INTEGER | Max HP/MP (for the UI's HP/MP bars) |
+| `position_x` / `position_y` | INTEGER | Placement. Y gives the lane (0-2=`enemy` enemy rear / 3-5=`front` front line / 6-7=`party` party rear) |
 | `yaml_blob` | TEXT | Full NPC YAML including persona |
 | `updated_at` | DATETIME | Last update timestamp |
 
@@ -193,21 +218,43 @@ Full audit trail of all turn communications.
 |--------|------|-------------|
 | `session_id` | INTEGER FK | Session ID |
 | `turn` | INTEGER | Turn number |
-| `role` | TEXT | `player` / `gm` / `npc` / `support` |
+| `role` | TEXT | `player` / `gm` / `npc` / `support` / `check` (check result) / `summary` |
 | `content` | TEXT | Message content |
 | `validated_at` | DATETIME | Validation timestamp |
 
 ### 6.4 checkpoints
-Turn-level snapshots for session restore (max 10 per session).
+Snapshots taken before each turn. Only the latest 10 per session are kept.
 
 | Column | Type | Description |
 |--------|------|-------------|
 | `session_id` | INTEGER FK | Session ID |
-| `turn` | INTEGER | Turn number when saved |
-| `snapshot_json` | TEXT | Complete game state as JSON |
+| `turn` | INTEGER | The state before this turn |
+| `snapshot_json` | TEXT | Snapshot of the NPC sheets (HP/MP, placement, YAML) as JSON |
 | `created_at` | DATETIME | Save timestamp |
 
-### 6.5 rag_chunks
+"Back to before turn N" (restore, redo, and undoing a failed turn) writes the NPC sheets back from turn N's checkpoint and deletes the logs, turn results, summary and checkpoints from turn N on.
+
+### 6.5 turn_results
+Finished turns (`TurnResult` as JSON). The source of the UI's chat log and of the recent turns sent to the LLM.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_id` | INTEGER FK | Session ID |
+| `turn` | INTEGER | Turn number (primary key together with `session_id`) |
+| `result_json` | TEXT | `TurnResult` (type in [api.md](api.md)) |
+| `created_at` | DATETIME | Save timestamp |
+
+### 6.6 session_summaries
+The session summary, one sentence per row.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_id` | INTEGER FK | Session ID |
+| `upto_turn` | INTEGER | Turns up to this one are summarized |
+| `text` | TEXT | One sentence with an explicit subject |
+| `created_at` | DATETIME | Creation timestamp |
+
+### 6.7 rag_chunks
 Rulebook text split into searchable chunks, plus house rules and corrections.
 
 | Column | Type | Description |
@@ -227,7 +274,7 @@ Rulebook text split into searchable chunks, plus house rules and corrections.
 
 On an existing DB, `source` / `section` / `page_from` / `page_to` are added automatically when the orchestrator starts (`db.Open`) and when `build_rulebook.py` / `embed_chunks.py` run.
 
-### 6.6 rag_chunks_opt
+### 6.8 rag_chunks_opt
 LLM-optimized variants of chunks (preferred in RAG search).
 
 | Column | Type | Description |
@@ -240,7 +287,7 @@ LLM-optimized variants of chunks (preferred in RAG search).
 | `model` | TEXT | Model URL used |
 | `optimized_at` | DATETIME | Optimization timestamp |
 
-### 6.7 player_characters
+### 6.9 player_characters
 Player character sheets.
 
 | Column | Type | Description |
@@ -249,7 +296,7 @@ Player character sheets.
 | `json_blob` | TEXT | JSON sheet (stats, skills, HP, etc.) |
 | `is_active` | INTEGER | 1=currently selected (only one at a time) |
 
-### 6.8 quests
+### 6.10 quests
 Quest board entries.
 
 | Column | Type | Description |
@@ -264,7 +311,7 @@ Quest board entries.
 | `tags` | TEXT | Comma-separated: `combat,explore,dungeon,social` |
 | `status` | TEXT | `available` / `active` / `completed` |
 
-### 6.9 scenarios
+### 6.11 scenarios
 Batch-generated adventure scenario materials.
 
 | Column | Type | Description |
@@ -279,7 +326,7 @@ Batch-generated adventure scenario materials.
 | `events_json` | TEXT | Event array (JSON) |
 | `status` | TEXT | `draft` / `ready` / `used` |
 
-### 6.10 scenario_images
+### 6.12 scenario_images
 Images linked to scenarios (`scenario_id=NULL` means shared background).
 
 | Column | Type | Description |
@@ -295,117 +342,70 @@ Images linked to scenarios (`scenario_id=NULL` means shared background).
 
 ## 7. API Endpoints
 
-### Game Engine
+[api.md](api.md) is the authoritative list of endpoints, request bodies, responses, WebSocket events and types. This section only shows the overall shape.
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `POST` | `/api/turn` | Process a player turn |
-| `POST` | `/api/gm-channel` | GM direct intervention |
-| `GET` | `/api/session/{id}` | Get session state |
-| `GET` | `/api/checkpoint/restore/{turn}` | Retrieve a checkpoint |
-| `GET` | `/api/comfy/status` | Check ComfyUI connectivity |
+| Area | Main endpoints |
+|------|----------------|
+| System | `GET /api/system` (LLM, embedding and image studio status, plus `apc_tenant`) |
+| Sessions | `GET/POST /api/sessions`, `GET/DELETE /api/sessions/{id}` |
+| Turns | `POST /api/sessions/{id}/turn` (202; 409 while a turn runs), `/cancel`, `/redo`, `/restore`, `/quest` |
+| Scene images | `GET /api/sessions/{id}/images/{file}` |
+| Party | `GET /api/personas`, `POST/DELETE /api/npc-sheet`, `PATCH /api/npc-sheet/{id}`, `PATCH /api/npc-position` |
+| PCs | `GET/POST /api/player-characters`, `PUT/DELETE /api/player-characters/{id}`, `PATCH .../{id}/activate` / `/deactivate` |
+| Quests | `GET /api/quests`, `PATCH /api/quests/{id}/accept` / `/complete` |
+| Rules | `GET /api/rules` (paged, filtered), `GET /api/rules/search` (the same search the game uses), `POST /api/rules`, `PATCH/DELETE /api/rules/{id}` |
+| Scenarios | `GET /api/scenarios`, `GET /api/scenarios/{id}`, `GET /api/scenarios/backgrounds`, `GET /api/scenarios/{id}/image/{imgid}`, `PATCH /api/scenarios/{id}/status` |
+| Other | `DELETE /api/checkpoint/{id}` (delete a checkpoint; not used by the UI) |
+| WebSocket | `/ws?session_id={id}`. The server sends `stage` / `delta` / `rules` / `check` / `turn` / `error` / `image` / `busy` |
 
-### NPC & Party Management
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/personas` | List persona templates |
-| `POST` | `/api/npc-sheet` | Add NPC to session |
-| `DELETE` | `/api/npc-sheet` | Remove NPC from session |
-| `PATCH` | `/api/npc-sheet/{id}` | Update NPC state (HP/MP/YAML) |
-| `PATCH` | `/api/npc-position` | Change NPC formation lane |
-
-### Player Characters
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/player-characters` | List all PCs |
-| `POST` | `/api/player-characters` | Create new PC |
-| `PUT` | `/api/player-characters/{id}` | Update PC |
-| `DELETE` | `/api/player-characters/{id}` | Delete PC |
-| `PATCH` | `/api/player-characters/{id}/activate` | Set active PC |
-| `PATCH` | `/api/player-characters/{id}/deactivate` | Deactivate PC |
-
-### Quests
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/quests` | List quests |
-| `PATCH` | `/api/quests/{id}/accept` | Accept quest |
-| `PATCH` | `/api/quests/{id}/complete` | Complete quest |
-
-### Rules Management
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/rules` | List chunks (filter: `?source_type=`). Each item includes `section` / `page_from` / `page_to` when set |
-| `POST` | `/api/rules` | Add houserule or correction. Embedded right after saving; the response reports the result as `embedded` (true/false) |
-| `PATCH` | `/api/rules/{id}` | Update chunk (text, tag, enabled). Re-embedded after the update |
-| `DELETE` | `/api/rules/{id}` | Delete chunk |
-
-If embedding fails (e.g. the mlx-serve embedding profile is down), the rule is still saved. Its `embedding` stays NULL; embed it later with `embed_chunks.py`.
-
-### Scenarios
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/scenarios` | List scenarios (filter: `?status=`) |
-| `GET` | `/api/scenarios/{id}` | Get scenario detail |
-| `GET` | `/api/scenarios/backgrounds` | List shared background images |
-| `GET` | `/api/scenarios/{id}/image/{imgid}` | Serve image file |
-| `PATCH` | `/api/scenarios/{id}/status` | Update scenario status |
-
-### DEV Mode (Developer Only)
-
-| Method | Path | Description |
-|--------|------|-------------|
-| `DELETE` | `/api/checkpoint/{id}` | Delete a checkpoint |
-| `DELETE` | `/api/session-log/turn/{turn}` | Delete turn logs (`?session_id=` required) |
-
-### WebSocket
-
-| Path | Description |
-|------|-------------|
-| `/ws` | WebSocket connection. Broadcasts `TurnResult` and `ImageUpdate` |
+Rules added or edited (`POST /api/rules`, `PATCH /api/rules/{id}`) are embedded right after saving. If embedding fails (e.g. the mlx-serve embedding profile is down), the rule is still saved; its `embedding` stays NULL, so embed it later with `embed_chunks.py`.
 
 ---
 
 ## 8. Game Engine Processing Flow
 
-Every LLM stage calls the same chat model (`LLM_URL`), one stage at a time.
+Every LLM stage calls the same chat model (`LLM_URL`), one stage at a time. Only one turn runs per session; sending, redoing, restoring or deleting while a turn runs (including the summary update) returns 409.
 
 ```
-Player → POST /api/turn
-                │
+Player → POST /api/sessions/{id}/turn  → 202 {"turn": N} (the server assigns the number)
+                │                         progress then arrives over WebSocket
        ┌────────▼─────────┐
-       │  Checkpoint      │ ← Save checkpoint (auto)
+       │  Checkpoint      │ ← Save the NPC sheets as they are before turn N (latest 10 kept)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  RAG Search      │ ← Search rag_chunks with the player input (top 5)
-       │  (extract rules) │   Priority: houserule > correction > rulebook
-       └────────┬─────────┘
-                │ Context injection
-       ┌────────▼─────────┐
-       │  GM              │ ← Generate scene narration (prose)
+       │  Session context │ ← Fixed prefix + summary + last 2 turns (§8.4)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  NPC 1 → 2 → 3   │ ← One at a time, in sheet order
-       │  Actions (YAML)  │   Based on each NPC's persona
+       │  RAG Search      │ ← Search rules with the player input (top 5, §12)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  Support         │ ← RAG search with the NPCs' actions (top 3),
-       │                  │   then confirm HP/MP deltas (JSON array)
+       │  GM              │ ← Narration, streamed. "判定: …" lines are rolled by code
+       └────────┬─────────┘   (a GM appeal ends here; NPCs and numbers do not move)
+       ┌────────▼─────────┐
+       │  NPC 1 → 2 → 3   │ ← One at a time in sheet order, following each persona. Streamed
+       │  Actions (YAML)  │   A `check` field is rolled by code
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  DB Update       │ ← Update npc_sheets HP/MP and lanes
-       │  Log             │   Append session_logs
+       │  Support         │ ← RAG search with the NPCs' actions (top 3), then confirm
+       │                  │   HP/MP deltas with the check results (JSON array)
        └────────┬─────────┘
-                │ WebSocket broadcast
        ┌────────▼─────────┐
-       │  ComfyUI Image   │ ← Optional, async
-       │  Generate/serve  │   Broadcast ImageUpdate separately
+       │  DB Update       │ ← npc_sheets HP/MP and lanes, turn_results, session_logs
+       └────────┬─────────┘
+                │ WebSocket: turn (the finished turn)
+       ┌────────▼─────────┐
+       │  Summary update  │ ← When 3 unsummarized turns have piled up (§8.4)
+       └────────┬─────────┘
+       ┌────────▼─────────┐
+       │  Scene image     │ ← Turn 1 and every IMAGE_EVERY turns (async, §11)
        └──────────────────┘
 ```
+
+GM and NPC text is received from mlx-serve as SSE and passed to the UI as `delta` events. Each stage's start, re-think and end arrive as `stage` events, the rules given to a stage as `rules`, and checks as `check`.
+
+When a turn fails (the GM never validates, a transport error, …), is cancelled (`/cancel`), or runs past `TURN_TIMEOUT_SEC` (default 900 s), the session goes back to its state before turn N and an `error` event is sent. `LLM_TIMEOUT_SEC` caps each single request.
+
+Redo (`/redo`) goes back to before the given turn and sends the input again in the same mode (action / appeal), optionally with new text (the UI only redoes the last turn). Restore (`/restore`) only goes back. Both work only for turns whose checkpoint is still kept (the latest 10).
 
 ### 8.1 Per-Stage Validation and Re-thinking
 
@@ -413,11 +413,11 @@ Each LLM stage's output is validated. If it fails, only that stage is called aga
 
 | Stage | Rejected when | When retries run out |
 |-------|---------------|----------------------|
-| GM | Empty / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn fails |
-| NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` | That NPC sits out the turn (recorded in `warnings`) |
+| GM | Empty (after the check lines are taken out) / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn fails (rolled back to its start) |
+| NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` / `check` not in the form 「判定名 基準値N 目標値M」 | That NPC sits out the turn (recorded in `warnings`) |
 | Support | Not a JSON array / not exactly one entry per acting NPC (unknown or duplicate names) / values out of range | The NPCs' own `hp_delta` / `mp_cost` are used (recorded in `warnings`) |
 
-Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`.
+Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`. When a re-think starts, a `stage` event with `status: retry` arrives and the UI discards that stage's text and receives it again.
 
 ### 8.2 LLM Requests
 
@@ -426,6 +426,8 @@ Every chat request (`/v1/chat/completions`) carries:
 | Item | Value |
 |------|-------|
 | `model` | `LLM_MODEL_ID`. mlx-vlm returns 422 without it and reloads the resident model if a different name is sent |
+| `X-APC-Tenant` header | `APC_TENANT` (default `sw25`). Keeps the prefix cache apart from other apps |
+| `stream` | `true` for the GM and NPC stages (received as SSE and streamed to the UI). Support and the summary use plain responses |
 | `seed` | Random per request. Without it mlx-vlm returns identical text for identical input |
 | thinking | Normally `{"enable_thinking": false, "chat_template_kwargs": {"enable_thinking": false}}`; enabled only when re-thinking |
 
@@ -433,46 +435,82 @@ Embeddings are requested from `/v1/embeddings` with `{"model": EMBED_MODEL_ID, "
 
 #### One turn = one conversation (for prefix caching)
 
-All stages of a turn are sent as one growing conversation. Each stage's request is "the previous stage's request + its answer + this stage's instruction", so mlx-vlm's automatic prefix caching (APC) reuses the KV of everything before and only prefills the new instruction.
+All stages of a turn are sent as one growing conversation after the session context (§8.4). Each stage's request is "the previous stage's request + its answer + this stage's instruction", so mlx-vlm's automatic prefix caching (APC) reuses the KV of everything before and only prefills the new instruction.
 
 ```
-system    Fixed text shared by every stage and turn (tableSystemPrompt; no changing values such as HP)
-user      【参照ルール】【パーティ】【プレイヤー入力】【指示: GM】
-assistant GM narration
-user      【指示: NPC「A」】 … assistant  A's YAML
-user      【指示: NPC「B」】 … assistant  B's YAML   ← B sees A's action and picks a different one
-user      【指示: NPC「C」】 … assistant  C's YAML
-user      【指示: 数値計算担当】(Support rules + action list JSON)
+system    Fixed prefix (table rules + accepted quest + PC + NPC personas) + summary
+user      【ターンN-2・プレイヤーの行動】…   assistant  that turn's recap (GM, NPC lines and actions, check results)
+user      【ターンN-1・プレイヤーの行動】…   assistant  same
+user      【参照ルール】【パーティの状態】【プレイヤーの行動】【指示: GM】
+assistant GM narration (including check lines)
+user      【判定結果】【指示: NPC「A」】 … assistant  A's YAML
+user      【判定結果】【指示: NPC「B」】 … assistant  B's YAML   ← B sees A's action and picks a different one
+user      【判定結果】【指示: NPC「C」】 … assistant  C's YAML
+user      【判定結果】【指示: 数値計算担当】(Support rules + action list JSON)
 ```
+
+Anything that changes every turn (HP/MP, lanes, retrieved rules, the stage's instruction) goes in the last user message.
 
 - Only answers that passed validation stay in the conversation; re-think exchanges and skipped NPCs' output do not
 - A re-think enables thinking, which changes the start of the template, so it misses the cache (acceptable since re-thinks are rare)
 - With APC off in mlx-serve every stage prefills the whole conversation and turns get slower. The server checks `apc.enabled` in `/health` at startup and logs a warning when it is off. See `docs/mlx-serve-client-notes.md` for the mlx-serve settings
 
-### 8.3 Additional TurnResult Fields
+### 8.3 Main TurnResult Fields
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `mode` | string | `action` / `gm` (GM appeal) |
+| `checks` | []Check | Checks rolled by the code (who, check, base, target, dice, total, result) |
+| `rules_used` | []RuleHit | Rules given to the stages (`matched_term` set when picked by the term index) |
 | `stage_attempts` | map[string]int | LLM calls per stage. Keys: `gm` / `npc:<name>` / `support`. A value of 2 or more means the stage was re-thought |
 | `warnings` | []string | Stages that never validated and were skipped or fell back |
+| `image_url` | string | Scene image (only on illustrated turns; attached later) |
+
+See `TurnResult` in [api.md](api.md) for every field.
+
+### 8.4 Session Memory
+
+Instead of starting a new conversation each turn, the session's story reaches the LLM in three parts (`pkg/game/context.go`, `summary.go`).
+
+| Part | Content | Where |
+|------|---------|-------|
+| Fixed prefix | Table rules (roles take turns, the system rolls the dice, …), the accepted quest, a summary of the active PC sheet (race, classes, abilities, max HP/MP, gear, combat feats), the NPC personas | system message |
+| Summary | The `session_summaries` sentences, oldest first | end of the system message |
+| Recent turns | The last 2 turns word for word (player input; GM narration, NPC lines and actions, check results) | user / assistant messages after the system message |
+
+- The prefix is ordered from least to most likely to change (table rules → quest → PC → NPCs) so it stays the same across turns and mlx-vlm's APC can reuse it
+- NPC personas come from the sheet YAML: race, gender, age, classes, max HP/MP, `personality`'s `tone` / `speech_style` / `values` / `fears` / `quirks`, `backstory`, `action_rules`, `equipment` and `skills` names. Missing keys are skipped
+- Summary: after each finished turn, once 3 or more unsummarized turns older than the last 2 have piled up, a recorder stage (`stage: summary`) folds them into 3–6 sentences, each with an explicit subject, and appends them to `session_summaries`. The session stays busy during the summary (the next turn gets 409). A failed summary is retried after the next turn
+
+### 8.5 Checks
+
+Check outcomes are decided by code, not by the LLM (`pkg/game/checks.go`).
+
+- For an action that needs a roll, the GM ends its narration with `判定: 誰/判定名/基準値N/目標値M` lines (one per check). These lines are taken out of the narration and rolled. GM appeals roll nothing
+- An NPC asks for a roll with the optional YAML field `check: 判定名 基準値N 目標値M`
+- The code rolls 2d6; dice + base ≥ target succeeds. A natural 12 always succeeds, a natural 2 always fails
+- Results are passed to later stages (NPCs, Support) as `【判定結果（システムが振ったサイコロ）】` and to the UI as `check` events, shown as dice chips. The next turn's GM narrates according to the recent turns' results
 
 ---
 
 ## 9. Frontend Screen Layout
 
+The UI uses the theme shared with the MLX screens (`ui/src/styles/theme.css`, `ui.css`), with dark mode and a 375px-wide layout. The header shows the status of the LLM, the embedding model and the image studio (`GET /api/system`), and a banner asks to start whatever is down.
+
 | Screen | Nav Label | Description |
 |--------|-----------|-------------|
-| **INFORMATION** | `start` | Pre-session: NPC selection, PC check, checkpoint restore |
-| **SESSION** | `session` | Active gameplay: chat log, action input, battle map, quest acceptance |
-| **QUEST BOARD** | `quest` | Quest list with party-level eligibility filter |
-| **PARTY** | `npc` | NPC stats, portrait album, attribute editing |
-| **RULES** | `rules` | Rulebook search, houserule entry, correction management, enable/disable toggle. Shows each chunk's part > chapter > heading and pages |
+| **Start** | セッション (no session open) | 続きから (recent sessions, which can also be deleted) and 新しく (create with a title and quest) |
+| **Session** | セッション | Chat log (player, GM and NPC bubbles), live per-stage progress and streamed text, dice / rule / re-think / skipped chips, ⏹ stop, ↻ redo, ✎ edit the input and redo, ⟲ back to before this turn, action / GM-appeal input. A side panel (a drawer on phones) with party HP/MP bars, the 3-lane formation, the PC, the quest, the summary and checkpoints |
+| **Quests** | クエスト | Quest list with party-level eligibility, accept (makes it the open session's quest) and complete |
+| **Party** | パーティ | This session's NPCs (add up to 3 from personas, remove, details and editing) and PCs (create, edit, switch the active one). NPC editing changes values while keeping unknown YAML keys |
+| **Rules** | ルール | The same search the game uses, a paged and filtered list, adding house rules and corrections, enable/disable toggle. Shows each chunk's part > chapter > heading and pages |
 
 ### DEV Mode
-Activated via the "DEV MODE" button in the header. Unlocks:
-- INFORMATION: Delete individual checkpoints
-- SESSION: Delete individual turn logs (✕ button per turn in chat)
-- PARTY: Direct YAML editing of NPC sheets
+Activated via the "DEV" button in the header. It enables direct YAML editing in the Party screen's NPC details (removing keys loses the persona, so take care).
+
+### Development
+- `OMNI_API=host:port npx vite` points the dev server at another orchestrator (default `localhost:8080`)
+- Opening the UI with `?mock=1` replays a mock turn without an orchestrator
 
 ---
 
@@ -507,77 +545,65 @@ hp_max: 38
 mp: 10
 mp_max: 10
 
-position:                   # Initial battle map coordinates
+position:                   # Initial placement
   x: 2
-  y: 5                      # 0-2=enemy rear / 3-5=front / 6-7=party rear
+  y: 5                      # 0-2=enemy rear (enemy) / 3-5=front line (front) / 6-7=party rear (party)
 
-equipment:
+equipment:                  # weapon / armor / shield / accessory go into the prefix
   weapon: Battle Axe +1
   armor: Chain Mail
   shield: Large Shield
 
-skills:
+skills:                     # names go into the prefix
   - name: Weapon Mastery (Axe/Hammer)
-    rank: 4
-    type: combat             # combat / magic / general
-    note: +1 to attack rolls with axes and hammers
+    description: +1 to attack rolls with axes and hammers
 
-consumables:
-  - name: Magic Arrow
-    cur: 3
-    max: 5
+personality:                # Goes into the prefix (system message)
+  tone: Gruff and short-tempered. Deeply loyal to companions.
+  speech_style: Terse sentences. Uses declarative endings.
+  values: Values strength and honesty.
+  fears: Failing to protect his companions.
+  quirks: Taps the axe handle three times before a fight.
 
-persona:                    # Injected into LLM system prompt
-  personality: Gruff and short-tempered. Deeply loyal to companions.
-  motivation: Protect his party at all costs.
-  speech: Terse sentences. Uses declarative endings.
-  priorities:
-    - Take the front line and draw enemy attacks
-    - Prioritize defense when HP drops below 10
-  forbidden:
-    - Delivering a killing blow to a surrendering enemy
-    - Attacking women or children
+backstory: |
+  A former mercenary whose unit was wiped out; he has wandered ever since.
+
+action_rules:
+  - Never deliver a killing blow to a surrendering enemy
+  - Prioritize defense when HP drops below 10
 ```
+
+Only the keys listed in §8.4 reach the LLM. Other keys (`stats`, `fortune`, …) do not reach the LLM, but they survive editing in the Party screen. See `data/personas/example_gard.yaml` for the full format.
 
 ### NPC LLM Output Format (fixed YAML)
 
 ```yaml
 name: Gard
 action: Swings axe at enemy
-dice: 2d6+8
-target: Goblin Warrior
 dialogue: "Don't move!"
-hp_delta: -15       # negative = damage / positive = healing
-mp_cost: 2
+mp_cost: 0          # 0..current MP
+hp_delta: 0         # Change to own HP, -current HP..0
 new_lane: front     # Only when lane changes (enemy/front/party)
+check: 命中力判定 基準値5 目標値12   # Only when the outcome depends on a roll (the code rolls)
 ```
 
 ---
 
-## 11. ComfyUI Integration
+## 11. Scene Images (MLX Image Studio)
 
 ### Connection
-- Run ComfyUI on the Windows machine and set `COMFY_URL` to its LAN address
-- If `COMFY_URL` is empty, image generation is fully disabled (no impact on gameplay)
+- Uses the MLX image studio mlx-studio-web (`IMAGES_URL`, default `http://127.0.0.1:11462`). The studio's Gemma picks the composition (tags, style, view) and the ComfyUI behind the studio draws it, so Omni-Master has no ComfyUI workflow of its own
+- Both the studio and Gemma (mlx-serve) must be running. If they are not, turns simply get no image
+- `IMAGE_EVERY=0` disables images (an empty `IMAGES_URL` falls back to the default, so it cannot be used to disable them)
 
-### Workflow
-Standard txt2img pipeline:
-
-```
-CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
-    → EmptyLatentImage → KSampler → VAEDecode → SaveImage
-```
-
-- Steps: 25
-- CFG Scale: 7.0
-- Sampler: Euler Ancestral / Scheduler: Karras
-- Scene images: 768×512 px (landscape)
-- Portraits: 512×768 px (portrait)
+### Timing
+- On action turns (not GM appeals): turn 1, and turns whose number is a multiple of `IMAGE_EVERY` (default 3). The code decides when to draw
+- Drawn asynchronously after the turn is finished (progress as `stage: image`). When done, an `image` event is sent and the image is attached to the turn's `image_url`, unless the turn was rewound meanwhile
 
 ### Image Retrieval Flow
-1. `POST /prompt` → obtain `prompt_id`
-2. Poll `GET /history/{prompt_id}` every 2 seconds (up to 120–180 seconds)
-3. On completion, download via `GET /view?filename=...&type=output`
+1. `POST /api/studio/infer` with a request built from the GM narration; poll the job until the composition is ready
+2. `POST /api/studio/render`; poll the job until the image is ready (6 minutes in total at most)
+3. Save it as `IMAGES_DIR/sessions/<session id>/<turn>.<ext>`, served by `GET /api/sessions/{id}/images/{file}`
 
 ---
 
@@ -586,7 +612,7 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ### Chunk Creation
 - Chunk the rulebook (OCR'd Markdown) with `build_rulebook.py` (`rulebook_chunker.py`)
   - Split by headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters split at 「。」; tables split by rows every 900 characters with the header row repeated)
-  - Ruby readings, full-width alphanumerics, page numbers, the table of contents, layout elements, blank form tables, the sample characters' filled sheets and similar noise are removed deterministically
+  - Ruby readings (「漢字（かな）」, and a kana word followed by the same kana in parentheses), full-width alphanumerics, page numbers, the table of contents, layout elements, blank form tables, the sample characters' filled sheets and similar noise are removed deterministically
   - Book pages are mapped to part / chapter / item via the table of contents, and each chunk gets `section` (part > chapter > item > heading), `page_from` / `page_to` and `tag`
   - The sample scenario 「蛮族を駆逐せよ」 is imported with `tag='scenario'` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions
   - `--apply` backs up the DB to `data/backup/`, then replaces the rulebook rows (`source` = `rulebook1` or empty). House rules and corrections are kept
@@ -601,18 +627,30 @@ CheckpointLoaderSimple → CLIPTextEncode (positive/negative)
 ### Search Algorithm
 1. Convert input text to an embedding vector
 2. Candidates are rows with `enabled=1` and an embedding, except chunks that an enabled correction or house rule overrides via `overrides_id` (only the fix is used; a disabled correction does not hide the original)
-3. Sort by cosine similarity; ties broken by `priority` (houserule first)
+3. Rank by cosine similarity plus a priority bonus (`priority` × 0.0025: house rules +0.05, corrections +0.025), so a house rule or correction beats a rulebook passage that is only slightly more similar
 4. If `rag_chunks_opt` exists for a chunk, use its text and vector instead
-5. Format the top-K results and inject them into the prompt
+5. If the input names a term in the term index (below), the chunks defining it (up to 2) come first; the rest is filled in the order above
+6. Format the top-K results and inject them into the prompt
+
+### Term Index
+Names of feats, spells, items, monsters and the like are looked up by reading rather than by embedding similarity (`pkg/rag/terms.go`).
+
+- Defining chunks: chunks whose `section` ends in a term in 《》【】〈〉. Ruby, rank numerals (Ⅰ, Ⅱ, …), middle dots and the like are stripped from the term for the index
+- Matching is by reading (katakana). Words are put back to their base form with kagome (IPA dictionary) before taking the reading, so 「庇う」, 「かばう」 and 「庇います」 all match 《かばうⅠ》
+- Terms whose reading is shorter than 3 characters are not indexed (short readings would match everywhere)
+- The index is built from the enabled rules on the first search, and rebuilt when rules are added, edited or deleted through the UI / API (after changing the DB directly, e.g. `build_rulebook.py --apply`, restart the orchestrator to rebuild it)
+- Chunks picked by term carry `matched_term` and show it on the UI's rule chips
+
+`GET /api/rules/search?q=&k=` returns the same search the game uses, so the Rules screen can be used to check what a query finds.
 
 ### Stages That Use It
 | Stage | Query | Count | Purpose |
 |-------|-------|-------|---------|
 | GM | Player input | 5 | Reference for narration and rulings |
-| Support | NPCs' actions (`action` and `dice`) | 3 | Follow values given in the rules (e.g. spell MP cost) when confirming HP/MP |
+| Support | NPCs' actions (`action` and `check`) | 3 | Follow values given in the rules (e.g. spell MP cost) when confirming HP/MP |
 | NPC | — | — | No rules are given |
 
-If the search fails or finds nothing, the stage continues without rules.
+If the search fails or finds nothing, the stage continues without rules. The rules given to a stage reach the UI as `rules` events and in the turn's `rules_used`.
 
 ### Context Format
 

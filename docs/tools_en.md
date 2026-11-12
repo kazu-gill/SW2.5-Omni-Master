@@ -42,7 +42,7 @@ Used for first-time setup and between-session data resets.
 **Standard reset (no arguments)**
 
 Cleared:
-- `sessions` (cascades to `npc_sheets`, `session_logs`, `checkpoints`)
+- `sessions` (every session; cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`)
 - `quests`
 
 Preserved:
@@ -51,8 +51,6 @@ Preserved:
 - `player_characters` (PC sheets)
 - `scenarios`, `scenario_images` (pre-generated scenarios)
 - `data/personas/*.yaml` (persona definitions)
-
-After the reset, session #1 is automatically recreated (the app assumes `SESSION_ID=1`).
 
 **Full reset (--full)**
 
@@ -77,7 +75,7 @@ Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
 ### Examples
 
 ```bash
-# Standard pre-session reset
+# Reset that deletes every session and the quests
 ./setup.sh
 
 # Full wipe and rebuild
@@ -135,12 +133,14 @@ ADDR=:8080
 # Database path
 DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
-# ComfyUI URL (leave empty to disable image generation)
-COMFY_URL=http://192.168.1.10:8188
+# Scene images (MLX image studio mlx-studio-web). IMAGE_EVERY=0 disables them
+IMAGES_URL=http://127.0.0.1:11462
+IMAGE_EVERY=3
 
-# Chat model (shared by GM / NPC / Support, on mlx-serve)
+# Chat model (shared by GM / NPC / Support / summary, on mlx-serve)
 LLM_URL=http://127.0.0.1:11441
 LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
+APC_TENANT=sw25
 
 # Embeddings (RAG, on mlx-serve)
 EMBED_URL=http://127.0.0.1:11455
@@ -222,21 +222,21 @@ Builds the chunks, prints the count, character lengths (min / median / max) and 
 3. Inserts the new chunks (`embedding` is NULL)
 4. Keeps house rule and correction rows. If a correction or house rule points at a row to be deleted via `overrides_id`, it exits without changing anything (re-point it in the UI and run again)
 
-Then run `embed_chunks.py` to create the embeddings.
+Then run `embed_chunks.py` to create the embeddings, and restart the orchestrator if it is running (the term index is built on the first search after startup and is not rebuilt when the DB is changed directly).
 
 ### How Chunks Are Built
 
 - `## ページ N` marks a PDF page. One PDF page holds a two-page spread of the book; its book pages are `2N-4` and `2N-3`
 - The table of contents (PDF pages 3–4) is read to map book pages to part / chapter / item
 - Text is split at headings and paragraphs, never mid-sentence (target ~600 characters; paragraphs over 900 characters are split at 「。」; tables are split by rows every 900 characters with the header row repeated)
-- Ruby readings in the form 「漢字（かな）」 are removed, and full-width alphanumerics become half-width
+- Ruby readings in the form 「漢字（かな）」, and a kana word followed by the same kana in parentheses, are removed, and full-width alphanumerics become half-width
 - Left out: page-number-only lines, table-of-contents leader lines, illustration credits, ©GROUP SNE lines, checkbox rows, page layout elements (sidebars, navigation, footers, ability charts, etc.), blank form tables (half or more of the body rows empty or holding only the first-column label), the sample characters' filled sheets (their explanatory prose is kept), and the index / designer's notes / staff list chapters
 - Runs of short headed entries (glossary style) are merged into one chunk with `【見出し】` labels. A short trailing piece is attached to the previous chunk and a short intro to the next. Identical text is deduplicated
 - Each chunk gets:
   - `section`: part > chapter > item > heading path
   - `page_from` / `page_to`: book pages
   - `tag`: `intro` / `character` / `rule` / `combat` / `magic` / `item` / `world` / `gm` / `monster` / `scenario` (`general` for text the table of contents does not cover)
-- The sample scenario 「蛮族を駆逐せよ」 is imported with tag `scenario` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions. It can be enabled from the RULES screen in the UI
+- The sample scenario 「蛮族を駆逐せよ」 is imported with tag `scenario` and `enabled=0`, so the GM does not pull the scenario's story into ordinary sessions. It can be enabled from the Rules screen in the UI
 
 ### Examples
 
@@ -282,7 +282,7 @@ uv run ai-agents/ocr_rulebook.py <file> [options]
 
 ### Source Types and Priority
 
-At equal similarity, higher-priority chunks are preferred during RAG retrieval.
+RAG retrieval ranks chunks by similarity plus a priority bonus (priority × 0.0025), so a house rule or correction beats a rulebook passage that is only slightly more similar.
 
 | Source Type | Priority | Use Case |
 |-------------|----------|----------|
@@ -647,7 +647,7 @@ uv run ai-agents/generate_scenarios.py \
 - The mlx-serve chat model (default port 11441, `/v1/chat/completions`) must be running for text generation.
 - For image generation, ensure the Windows-side ComfyUI is running and reachable.
 - Use `--no-images` to run without ComfyUI.
-- Scenarios registered with `--publish-quest` appear immediately in the UI QUEST BOARD.
+- Scenarios registered with `--publish-quest` appear immediately in the UI's Quests screen.
 
 ---
 
@@ -678,14 +678,21 @@ Create it from `config.env.example` (`cp config.env.example config.env`). Main k
 ADDR=:8080
 DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
 
-# ComfyUI (leave empty to disable image generation)
+# Scene images (MLX image studio mlx-studio-web). IMAGE_EVERY=0 disables them
+IMAGES_URL=http://127.0.0.1:11462
+IMAGE_EVERY=3
+IMAGES_DIR=/Users/kf/AI/SW2.5-Omni-Master/data/images
+
+# ComfyUI (not used by the game; generate_scenarios.py reads --comfy-url or the COMFY_URL environment variable)
 COMFY_URL=http://192.168.1.10:8188
 
-# Chat model (mlx-serve, shared by GM / NPC / Support)
+# Chat model (mlx-serve, shared by GM / NPC / Support / summary)
 LLM_URL=http://127.0.0.1:11441
 LLM_MODEL_ID=gemma4-31b-it-heretic-4bit-mtp
-LLM_TIMEOUT_SEC=300
+LLM_TIMEOUT_SEC=300          # per request
 STAGE_RETRY_LIMIT=2
+TURN_TIMEOUT_SEC=900         # whole turn
+APC_TENANT=sw25
 
 # Embeddings (mlx-serve, RAG)
 EMBED_URL=http://127.0.0.1:11455
