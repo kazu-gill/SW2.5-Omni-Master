@@ -83,6 +83,9 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 		tr: &TurnResult{
 			SessionID: input.SessionID, Turn: input.Turn, Mode: input.Mode, Input: input.Text,
 			StageAttempts: map[string]int{}, CreatedAt: time.Now(),
+			// Empty lists, not null, so the UI can map over them.
+			NPCActions: []NPCAction{}, Deltas: []ResourceDelta{}, FormationChanges: []FormationChange{},
+			Checks: []Check{}, RulesUsed: []RuleHit{}, Warnings: []string{},
 		},
 	}
 
@@ -99,18 +102,18 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 	if err != nil {
 		return nil, fmt.Errorf("npc actions: %w", err)
 	}
-	run.tr.NPCActions = npcActions
+	run.tr.NPCActions = append(run.tr.NPCActions, npcActions...)
 
 	deltas, err := run.support(ctx, npcActions, sheets)
 	if err != nil {
 		return nil, fmt.Errorf("resource calc: %w", err)
 	}
-	run.tr.Deltas = deltas
+	run.tr.Deltas = append(run.tr.Deltas, deltas...)
 
 	if err := e.applyDeltas(deltas, sheets); err != nil {
 		return nil, fmt.Errorf("apply deltas: %w", err)
 	}
-	run.tr.FormationChanges = e.applyFormationChanges(npcActions, sheets)
+	run.tr.FormationChanges = append(run.tr.FormationChanges, e.applyFormationChanges(npcActions, sheets)...)
 	return run.tr, nil
 }
 

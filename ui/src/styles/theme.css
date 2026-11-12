@@ -1,0 +1,29 @@
+/* 画面共通の配色 (mlx_serve/appbar.py が /theme.css として配る).
+   チャット・即興・スタジオ・BGM・名鑑・画像工房が <head> で読み、画面だけの色 (--join・--fav など) は各画面で足す.
+   ダッシュボードは計器の画面なので独自の配色 (--surface など) を持つ. */
+:root {
+  --bg: #eef1f5; --panel: #ffffff; --text: #1d2330; --muted: #6b7384; --line: #d9dee7;
+  --llm: #ffffff; --me: #2f6fed; --me-text: #ffffff; --accent: #2f6fed; --danger: #c43c3c;
+  --shadow: 0 1px 2px rgb(0 0 0 / 8%);
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #14171d; --panel: #1d2129; --text: #e6e9ef; --muted: #8b93a3; --line: #2c323d;
+    --llm: #252a34; --me: #3b73e6; --me-text: #ffffff; --accent: #6d9bff; --danger: #ff7a7a;
+    --shadow: none;
+  }
+}
+
+/* ---- ここから SW2.5 Omni-Master だけの色 (MLX の theme.css には無いもの) ---- */
+:root {
+  --ok: #2e9e5b; --warn: #b7791f; --hp: #2e9e5b; --mp: #2f6fed;
+  --gm: #fbf6ea; --gm-line: #e7d9b4; --enemy: #c43c3c;
+  --scrim: rgb(0 0 0 / 30%); --on-accent: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --ok: #4cc27f; --warn: #e0a645; --hp: #4cc27f; --mp: #6d9bff;
+    --gm: #2a2720; --gm-line: #4a412c; --enemy: #ff7a7a;
+    --scrim: rgb(0 0 0 / 50%); --on-accent: #ffffff;
+  }
+}

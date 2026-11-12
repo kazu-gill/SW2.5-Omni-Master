@@ -1,0 +1,121 @@
+/* 画面の骨組みと共通の小物。色は theme.css の変数だけを使う. */
+html, body, #root { height: 100%; }
+.app.ui-page { height: 100dvh; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+.grow { flex: 1; min-width: 0; }
+.center { text-align: center; }
+.pre { white-space: pre-wrap; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; }
+h3 { margin: 0; font-size: 15px; }
+h4 { margin: 6px 0 0; font-size: 13.5px; color: var(--muted); }
+p { margin: 0; }
+.icon-btn { padding: 4px 9px; min-width: 36px; }
+
+/* ---- 上のバー ---- */
+.app-header { gap: 6px 10px; padding: 6px 12px calc(6px) max(12px, env(safe-area-inset-left)); padding-top: max(6px, env(safe-area-inset-top)); }
+.app-header > b { margin-right: 0; white-space: nowrap; }
+.pills { display: flex; gap: 4px; margin-right: auto; overflow-x: auto; scrollbar-width: none; }
+.pill { border: 0; border-radius: 999px; padding: 4px 12px; white-space: nowrap; color: var(--muted); }
+.pill:hover { color: var(--text); }
+.pill.on { background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 600; }
+.sys { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--muted); min-width: 0; }
+.sys-item { display: inline-flex; align-items: center; gap: 4px; white-space: nowrap; max-width: 220px; overflow: hidden; text-overflow: ellipsis; }
+.dev { font-size: 12px; padding: 2px 8px; color: var(--muted); }
+.dev.on { border-color: var(--warn); color: var(--warn); }
+.banner { background: color-mix(in srgb, var(--danger) 12%, var(--panel)); color: var(--danger); padding: 6px 16px; font-size: 13px;
+  border-bottom: 1px solid var(--line); }
+.banner.soft { background: color-mix(in srgb, var(--warn) 10%, var(--panel)); color: var(--text); }
+.notice { background: color-mix(in srgb, var(--accent) 10%, var(--panel)); border-radius: 10px; padding: 8px 12px; font-size: 13px; }
+
+.app-main { flex: 1; min-height: 0; overflow-y: auto; }
+.app-main.full { overflow: hidden; display: flex; flex-direction: column; }
+.page { width: 100%; max-width: 1100px; margin: 0 auto; padding: 16px 16px calc(24px + env(safe-area-inset-bottom));
+  display: flex; flex-direction: column; gap: 14px; }
+.page h2, .start h2 { margin: 0; font-size: 17px; }
+.center-box { padding: 40px 16px; display: flex; flex-direction: column; gap: 10px; align-items: center; text-align: center; }
+
+/* ---- チップ・バッジ ---- */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip { border: 1px solid var(--line); background: var(--bg); border-radius: 999px; padding: 1px 10px; font-size: 12.5px;
+  white-space: nowrap; color: var(--text); }
+button.chip { cursor: pointer; }
+.chip.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.chip.hp { color: var(--hp); border-color: color-mix(in srgb, var(--hp) 40%, var(--line)); }
+.chip.hp.bad, .chip.dice.bad { color: var(--danger); border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
+.chip.mp { color: var(--mp); border-color: color-mix(in srgb, var(--mp) 40%, var(--line)); }
+.chip.dice.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--line)); }
+.chip.move { color: var(--accent); }
+.chip.rule { color: var(--muted); max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+.chip.rule.on { background: var(--panel); color: var(--text); border-color: var(--accent); }
+.chip.src-houserule { color: var(--warn); }
+.chip.src-correction { color: var(--accent); }
+.badge { font-size: 11.5px; color: var(--muted); border: 1px dashed var(--line); border-radius: 6px; padding: 0 6px; }
+.badge.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 40%, var(--line)); }
+.badge.gm { color: var(--warn); border-style: solid; border-color: var(--warn); font-weight: 600; }
+
+/* ---- 入力 ---- */
+.field { display: flex; flex-direction: column; gap: 4px; font-size: 13px; color: var(--muted); min-width: 0; }
+.field > input, .field > select, .field > textarea { color: var(--text); width: 100%; }
+.field.small { width: 140px; }
+.check { display: inline-flex; gap: 4px; align-items: center; font-size: 13px; }
+textarea { resize: vertical; line-height: 1.5; }
+.err.line { padding: 2px 12px; text-align: center; }
+.danger-text { color: var(--danger); border-color: transparent; }
+
+/* ---- 確認ダイアログ (MLX の dialogs.js と同じ見た目) ---- */
+.ui-dialog { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(420px, calc(100vw - 32px));
+  background: var(--panel); color: var(--text); }
+.ui-dialog::backdrop, .modal::backdrop { background: var(--scrim); }
+.ui-dialog form { display: flex; flex-direction: column; gap: 10px; padding: 18px; margin: 0; }
+.ui-dialog h2 { margin: 0; font-size: 16px; }
+.ui-dialog .ui-msg { font-size: 13px; line-height: 1.6; color: var(--muted); white-space: pre-wrap; }
+.ui-dialog label { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: var(--muted); }
+.ui-dialog .ui-err { font-size: 12.5px; color: var(--danger); }
+.ui-dialog .ui-acts { display: flex; justify-content: flex-end; gap: 8px; margin-top: 4px; }
+.ui-dialog button { font-size: 13px; padding: 6px 14px; }
+.ui-dialog button.ui-ok { border-color: var(--accent); background: var(--accent); color: var(--on-accent); }
+.ui-dialog button.ui-ok.danger { border-color: var(--danger); background: var(--danger); color: var(--on-accent); }
+
+/* ---- 編集用のダイアログ ---- */
+.modal { border: 1px solid var(--line); border-radius: 14px; padding: 0; width: min(560px, calc(100vw - 24px)); max-height: 90dvh;
+  background: var(--panel); color: var(--text); }
+.modal[open] { display: flex; flex-direction: column; }
+.modal.wide { width: min(900px, calc(100vw - 24px)); }
+.modal-head { display: flex; align-items: center; gap: 8px; padding: 10px 14px; border-bottom: 1px solid var(--line); }
+.modal-head b { flex: 1; min-width: 0; }
+.modal-body { flex: 1; overflow-y: auto; padding: 12px 14px; display: flex; flex-direction: column; gap: 10px; }
+.modal-foot { display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; align-items: center; padding: 10px 14px; border-top: 1px solid var(--line); }
+
+/* ---- 一覧・カード ---- */
+.card { position: relative; background: var(--panel); border-radius: 14px; box-shadow: var(--shadow); border: 1px solid var(--line);
+  padding: 12px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.card small { color: var(--muted); font-size: 12px; overflow-wrap: anywhere; }
+.card .corner { position: absolute; top: 6px; right: 6px; font-size: 12px; padding: 2px 7px; border: 0; }
+.list { display: flex; flex-direction: column; }
+.list-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
+.list-row:first-child { border-top: 0; }
+.list-row.on b { color: var(--accent); }
+.acts { display: flex; gap: 2px; flex-wrap: wrap; align-items: center; }
+.acts button { border: 0; font-size: 12px; padding: 1px 6px; color: var(--muted); }
+.acts button:hover:not(:disabled) { color: var(--text); }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 0; font-size: 13.5px; }
+.kv > div { display: contents; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
+.kv.stats { display: flex; flex-wrap: wrap; gap: 2px 16px; }
+.kv.stats > div { display: flex; gap: 6px; }
+
+/* ---- HP / MP の棒 ---- */
+.bar { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.bar-label { width: 22px; color: var(--muted); }
+.bar-track { flex: 1; height: 6px; border-radius: 3px; background: color-mix(in srgb, var(--text) 10%, transparent); overflow: hidden; }
+.bar-track i { display: block; height: 100%; transition: width .3s; }
+.bar.hp .bar-track i { background: var(--hp); }
+.bar.mp .bar-track i { background: var(--mp); }
+.bar-num { min-width: 52px; text-align: right; font-variant-numeric: tabular-nums; }
+
+@media (max-width: 799px) {
+  .app-header .pills { order: 9; flex-basis: 100%; margin-right: 0; }
+  .app-header > b { margin-right: auto; }
+  .sys-item { max-width: 120px; }
+  .acts button { padding: 4px 8px; }
+}

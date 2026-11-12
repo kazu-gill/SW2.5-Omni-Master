@@ -106,7 +106,7 @@ func TestTurnRunsInBackgroundAndStreamsProgress(t *testing.T) {
 		t.Errorf("second turn = %v", started)
 	}
 	msg, _ = read("turn")
-	if r := msg["result"].(map[string]any); r["mode"] != "gm" || r["npc_actions"] != nil {
+	if r := msg["result"].(map[string]any); r["mode"] != "gm" || len(r["npc_actions"].([]any)) != 0 || r["checks"] == nil {
 		t.Errorf("GM appeal result = %v", r)
 	}
 }

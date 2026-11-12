@@ -1,5 +1,7 @@
 import { useState } from 'react'
-import type { PCSheet, PCClass, PCWeapon, PCItem } from '../types'
+import Modal from '../../components/Modal'
+import { errorText } from '../../api'
+import type { PCSheet, PCClass, PCWeapon, PCItem } from '../../types'
 
 interface Props {
   pcId: number | null   // null = new PC
@@ -31,34 +33,13 @@ const ATTR_LABELS: { key: keyof PCSheet['attrs']; jp: string; en: string }[] = [
   { key: 'spr', jp: '精神力', en: 'SPR' },
 ]
 
-export function makeEmptySheet(): PCSheet {
-  return {
-    name: '', race: 'ヒューマン', gender: '', age: '', height: '', weight: '',
-    birthplace: '', adventurerLevel: 1, exp: 0,
-    attrs: {
-      dex: { base: 10, growth: 0 },
-      agi: { base: 10, growth: 0 },
-      str: { base: 10, growth: 0 },
-      vit: { base: 10, growth: 0 },
-      int: { base: 10, growth: 0 },
-      spr: { base: 10, growth: 0 },
-    },
-    hpCurrent: 0, hpMax: 0, mpCurrent: 0, mpMax: 0,
-    classes: [{ name: 'ファイター', level: 1 }],
-    combatFeats: '',
-    weapons: [{ name: '', style: '', hit: '', damage: '', range: '近接', note: '' }],
-    armor: '', shield: '', accessories: '',
-    inventory: [],
-    gold: 0, languages: '共通語', notes: '',
-  }
-}
-
 function attrTotal(a: { base: number; growth: number }) { return a.base + a.growth }
 function attrBonus(total: number) { return Math.floor(total / 6) }
 
 export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
   const [sheet, setSheet] = useState<PCSheet>(initial)
   const [saving, setSaving] = useState(false)
+  const [err, setErr] = useState('')
   const [activeTab, setActiveTab] = useState<'basic' | 'combat' | 'equip' | 'items'>('basic')
 
   function setField<K extends keyof PCSheet>(key: K, val: PCSheet[K]) {
@@ -113,8 +94,14 @@ export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
 
   async function handleSave() {
     setSaving(true)
-    await onSave(pcId, sheet)
-    setSaving(false)
+    setErr('')
+    try {
+      await onSave(pcId, sheet)
+    } catch (e) {
+      setErr(`保存できませんでした: ${errorText(e)}`)
+    } finally {
+      setSaving(false)
+    }
   }
 
   const tabs = [
@@ -125,27 +112,18 @@ export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
   ] as const
 
   return (
-    <div className="pc-edit-overlay" onClick={(e) => { if (e.target === e.currentTarget) onClose() }}>
-      <div className="pc-edit-modal">
-
-        {/* ── HEADER ── */}
-        <div className="pc-edit-header">
-          <div className="pc-edit-title">
-            <span style={{ color: 'var(--gold)', fontFamily: 'var(--font-display)', letterSpacing: '0.15em' }}>
-              CHARACTER SHEET
-            </span>
-            <span style={{ fontSize: 12, color: 'var(--text-dim)', marginLeft: 12 }}>
-              {sheet.name || '名前未設定'} / {sheet.race} Lv{sheet.adventurerLevel}
-            </span>
-          </div>
-          <div style={{ display: 'flex', gap: 8 }}>
-            <button className="pc-edit-save-btn" onClick={handleSave} disabled={saving}>
-              {saving ? '保存中…' : '💾 保存'}
-            </button>
-            <button className="pc-edit-close-btn" onClick={onClose}>✕</button>
-          </div>
-        </div>
-
+    <Modal
+      wide
+      title={<>キャラクターシート <span className="ui-sys">{sheet.name || '名前未設定'} / {sheet.race} 冒険者Lv{sheet.adventurerLevel}</span></>}
+      onClose={onClose}
+      footer={
+        <>
+          {err && <span className="err grow">{err}</span>}
+          <button onClick={onClose}>やめる</button>
+          <button className="primary" onClick={handleSave} disabled={saving}>{saving ? '保存しています…' : '保存'}</button>
+        </>
+      }
+    >
         {/* ── TABS ── */}
         <div className="pc-edit-tabs">
           {tabs.map((t) => (
@@ -249,13 +227,13 @@ export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
               <div className="pc-section-title" style={{ marginTop: 20 }}>HP / MP</div>
               <div className="pc-hpmp-row">
                 <div className="pc-hpmp-group">
-                  <span className="pc-hpmp-label" style={{ color: 'var(--hp-color)' }}>HP</span>
+                  <span className="pc-hpmp-label" style={{ color: 'var(--hp)' }}>HP</span>
                   <div className="pc-field-inline">
                     <label>現在</label>
                     <input type="number" min={0} value={sheet.hpCurrent}
                       onChange={(e) => setField('hpCurrent', parseInt(e.target.value) || 0)} />
                   </div>
-                  <span style={{ color: 'var(--text-dim)' }}>/</span>
+                  <span className="ui-muted">/</span>
                   <div className="pc-field-inline">
                     <label>最大</label>
                     <input type="number" min={0} value={sheet.hpMax}
@@ -263,13 +241,13 @@ export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
                   </div>
                 </div>
                 <div className="pc-hpmp-group">
-                  <span className="pc-hpmp-label" style={{ color: 'var(--mp-color)' }}>MP</span>
+                  <span className="pc-hpmp-label" style={{ color: 'var(--mp)' }}>MP</span>
                   <div className="pc-field-inline">
                     <label>現在</label>
                     <input type="number" min={0} value={sheet.mpCurrent}
                       onChange={(e) => setField('mpCurrent', parseInt(e.target.value) || 0)} />
                   </div>
-                  <span style={{ color: 'var(--text-dim)' }}>/</span>
+                  <span className="ui-muted">/</span>
                   <div className="pc-field-inline">
                     <label>最大</label>
                     <input type="number" min={0} value={sheet.mpMax}
@@ -421,7 +399,6 @@ export default function PCEditView({ pcId, initial, onSave, onClose }: Props) {
           )}
 
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }

@@ -1,0 +1,99 @@
+/* セッション画面 (MLX の汎用チャットに合わせた吹き出し・入力欄・引き出し). */
+.session { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+.session-bar { display: flex; align-items: center; gap: 8px; padding: 6px 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.session-bar .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.side-toggle { display: none; white-space: nowrap; }
+.session-body { flex: 1; min-height: 0; display: flex; position: relative; }
+.chat { flex: 1; min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+
+/* ---- 会話ログ ---- */
+.log { flex: 1; overflow-y: auto; padding: 16px 12px 8px; display: flex; flex-direction: column; gap: 14px; }
+.log > * { width: 100%; max-width: 860px; margin: 0 auto; }
+.turn { display: flex; flex-direction: column; gap: 10px; }
+.empty { color: var(--muted); text-align: center; padding: 40px 10px; font-size: 14px; display: flex; flex-direction: column; gap: 6px; }
+.empty .big { font-size: 40px; }
+.msg { display: flex; gap: 8px; align-items: flex-start; }
+.msg.me { flex-direction: row-reverse; }
+.msg .av { flex: none; width: 32px; height: 32px; border-radius: 50%; background: var(--panel); box-shadow: var(--shadow);
+  display: flex; align-items: center; justify-content: center; font-size: 17px; }
+.msg .col { min-width: 0; max-width: min(720px, 85%); display: flex; flex-direction: column; gap: 4px; }
+.msg.me .col { align-items: flex-end; }
+.msg .who { font-size: 12px; color: var(--muted); }
+.bubble { background: var(--llm); border-radius: 14px; padding: 8px 12px; box-shadow: var(--shadow); overflow-wrap: anywhere;
+  min-width: 0; max-width: 100%; white-space: pre-wrap; }
+.msg.me .bubble { background: var(--me); color: var(--me-text); }
+.msg.me .bubble .ui-muted { color: var(--me-text); opacity: .8; }
+.msg.gm .bubble { background: var(--gm); border: 1px solid var(--gm-line); }
+.bubble.typing::after { content: "▍"; animation: blink 1s steps(1) infinite; }
+@keyframes blink { 50% { opacity: 0; } }
+.bubble .dialogue { font-weight: 500; }
+.bubble .action { color: var(--muted); font-size: 13.5px; }
+.bubble .raw { color: var(--muted); font-size: 13px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.editbox { width: min(640px, 100%); }
+.editbox textarea { width: 100%; min-height: 4em; }
+.pic { display: block; max-width: 420px; border-radius: 10px; overflow: hidden; background: color-mix(in srgb, var(--text) 6%, transparent); }
+.pic img { width: 100%; display: block; }
+.rules-used { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
+.rule-text { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 10px; font-size: 13px;
+  white-space: pre-wrap; max-height: 16em; overflow-y: auto; }
+
+/* ---- 進行中 ---- */
+.progress { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; font-size: 12.5px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 10px; padding: 4px 10px; background: var(--panel); }
+.progress ol { display: flex; flex-wrap: wrap; gap: 2px 12px; list-style: none; margin: 0; padding: 0; flex: 1; min-width: 0; }
+.progress li { white-space: nowrap; }
+.progress li.cur { color: var(--accent); font-weight: 600; }
+.progress li.cur .mk { animation: blink 1s steps(1) infinite; }
+.progress li.st-done .mk { color: var(--ok); }
+.progress li.st-failed { color: var(--danger); }
+.live-extra { display: flex; flex-direction: column; gap: 4px; padding-left: 40px; }
+.fail-box { display: flex; flex-direction: column; gap: 6px; border: 1px solid color-mix(in srgb, var(--danger) 40%, var(--line));
+  border-radius: 10px; padding: 8px 12px; background: var(--panel); }
+
+/* ---- 入力欄 ---- */
+.composer-wrap { padding: 0 12px calc(8px + env(safe-area-inset-bottom)); width: 100%; max-width: 884px; margin: 0 auto;
+  display: flex; flex-direction: column; gap: 4px; }
+.composer { display: flex; gap: 6px; align-items: flex-end; padding-top: 6px; }
+.composer textarea { flex: 1; resize: none; max-height: 40vh; padding: 7px 10px; border-radius: 12px; min-height: 38px; }
+.composer > button { height: 38px; white-space: nowrap; }
+.seg { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 10px; overflow: hidden; flex: none; }
+.seg button { border: 0; border-radius: 0; padding: 1px 8px; font-size: 12px; color: var(--muted); }
+.seg button.on { background: var(--accent); color: var(--on-accent); }
+.seg button.on.gm { background: var(--warn); }
+
+/* ---- 右の引き出し ---- */
+.side-wrap { width: 320px; flex: none; border-left: 1px solid var(--line); background: var(--bg); overflow-y: auto; }
+.side { display: flex; flex-direction: column; gap: 10px; padding: 10px 10px calc(10px + env(safe-area-inset-bottom)); }
+.side-head { display: none; align-items: center; gap: 8px; }
+.side-head b { flex: 1; }
+.member { display: flex; flex-direction: column; gap: 3px; padding: 4px 0; }
+.member + .member { border-top: 1px solid var(--line); padding-top: 8px; }
+.summary, .cps { margin: 0; padding-left: 18px; font-size: 13px; display: flex; flex-direction: column; gap: 4px; }
+.cps { list-style: none; padding: 0; }
+.cps li { justify-content: space-between; }
+.cps button { font-size: 12px; padding: 1px 8px; }
+.scrim { display: none; }
+
+/* 3 レーンの配置 */
+.formation { display: flex; flex-direction: column; gap: 4px; }
+.lane { border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; display: flex; flex-direction: column; gap: 4px; min-height: 52px; }
+.lane-name { font-size: 11.5px; color: var(--muted); }
+.lane-enemy { border-color: color-mix(in srgb, var(--enemy) 35%, var(--line)); }
+.lane-enemy .lane-name { color: var(--enemy); }
+.lane-front { border-style: dashed; }
+.lane.target { cursor: pointer; background: color-mix(in srgb, var(--accent) 6%, transparent); }
+.lane.target:hover { border-color: var(--accent); }
+.chip.pc { color: var(--accent); }
+
+@media (max-width: 799px) {
+  .side-toggle { display: inline-block; }
+  .side-wrap { position: absolute; top: 0; right: 0; bottom: 0; width: min(340px, 88vw); z-index: 15; display: none;
+    box-shadow: -4px 0 16px var(--scrim); }
+  .side-wrap.open { display: block; }
+  .side-head { display: flex; }
+  .scrim { display: block; position: absolute; inset: 0; background: var(--scrim); z-index: 14; }
+  .msg .col { max-width: 88%; }
+  .msg .av { width: 28px; height: 28px; font-size: 15px; }
+  .live-extra { padding-left: 0; }
+  .session-bar .ui-sys { display: none; }
+}

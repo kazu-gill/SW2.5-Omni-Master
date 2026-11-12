@@ -30,6 +30,7 @@ _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*$")
 _PAGE_RE = re.compile(r"^##\s*ページ\s*(\d+)\s*$", re.MULTILINE)
 _TOC_LEADER_RE = re.compile(r"_{3,}\s*\d+\s*$")
 _RUBY_RE = re.compile(r"([一-鿿々ヶァ-ヺー]+)[（(]([ぁ-ゖー]+)[）)]")
+_SAME_KANA_RUBY_RE = re.compile(r"([\u3041-\u3096\u30fc]+)[（(]\1[）)]")
 _FULLWIDTH_ALNUM = {
     c: chr(c - 0xFEE0)
     for c in [*range(0xFF10, 0xFF1A), *range(0xFF21, 0xFF3B), *range(0xFF41, 0xFF5B)]
@@ -97,7 +98,9 @@ class Chunk:
 
 def strip_ruby(text: str) -> str:
     """「漢字（かな）」形式のルビを取り除く。かな以外を含む括弧はそのまま残す。"""
-    return _RUBY_RE.sub(r"\1", text)
+    text = _RUBY_RE.sub(r"\1", text)
+    # ひらがなの語に同じ読みが重ねて付いたもの (かばう（かばう）) も外す
+    return _SAME_KANA_RUBY_RE.sub(r"\1", text)
 
 
 def normalize_text(text: str) -> str:

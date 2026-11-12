@@ -15,6 +15,7 @@ def test_strip_ruby_removes_kana_reading_after_kanji():
     assert strip_ruby("主動作（しゅどうさ）の効果（こうか）") == "主動作の効果"
     assert strip_ruby("剣（つるぎ）の世界") == "剣の世界"
     assert strip_ruby("データ（でーた）の読み方") == "データの読み方"
+    assert strip_ruby("《かばう（かばう）Ⅰ》") == "《かばうⅠ》"
 
 
 def test_strip_ruby_keeps_real_parentheticals():

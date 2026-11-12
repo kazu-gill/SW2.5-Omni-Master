@@ -196,7 +196,7 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 		Lane      string `json:"lane"` // "enemy" | "front" | "party"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 
@@ -223,7 +223,7 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if target == nil {
-		writeError(w, http.StatusNotFound, "npc not found")
+		writeError(w, http.StatusNotFound, "その NPC はこのセッションにいません。画面を再読み込みしてください。")
 		return
 	}
 	target.PositionY = newY
@@ -251,7 +251,7 @@ const maxNPCs = 3
 func (h *Handler) handleListPersonas(w http.ResponseWriter, r *http.Request) {
 	entries, err := os.ReadDir(h.personasDir)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "cannot read personas dir: "+err.Error())
+		writeError(w, http.StatusInternalServerError, "ペルソナのフォルダを読めません (config.env の PERSONAS_DIR を確認してください): "+err.Error())
 		return
 	}
 	var personas []personaInfo
@@ -281,7 +281,7 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		PersonaID string `json:"persona_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 
@@ -303,7 +303,7 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if raw == nil {
-		writeError(w, http.StatusNotFound, "persona not found")
+		writeError(w, http.StatusNotFound, "ペルソナが見つかりません。data/personas に YAML があるか確認してください。")
 		return
 	}
 
@@ -346,7 +346,7 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 		Name      string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	if err := db.DeleteNPCSheet(h.database, req.SessionID, req.Name); err != nil {
@@ -361,7 +361,7 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	var req struct {
@@ -370,7 +370,7 @@ func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 		YAMLBlob *string `json:"yaml_blob"` // 省略すると YAML はそのまま
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	if req.YAMLBlob != nil {
@@ -406,7 +406,7 @@ func (h *Handler) handleListQuests(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if err := db.AcceptQuest(h.database, id); err != nil {
@@ -419,7 +419,7 @@ func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleCompleteQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if err := db.CompleteQuest(h.database, id); err != nil {
@@ -455,7 +455,7 @@ func (h *Handler) handleCreatePC(w http.ResponseWriter, r *http.Request) {
 		JSONBlob string `json:"json_blob"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	if req.Name == "" {
@@ -474,7 +474,7 @@ func (h *Handler) handleCreatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	var req struct {
@@ -482,7 +482,7 @@ func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 		JSONBlob string `json:"json_blob"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	if err := db.UpdatePlayerCharacter(h.database, id, req.Name, req.JSONBlob); err != nil {
@@ -495,7 +495,7 @@ func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeletePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if err := db.DeletePlayerCharacter(h.database, id); err != nil {
@@ -508,7 +508,7 @@ func (h *Handler) handleDeletePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleActivatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if err := db.ActivatePlayerCharacter(h.database, id); err != nil {
@@ -521,7 +521,7 @@ func (h *Handler) handleActivatePC(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeactivatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if err := db.DeactivatePlayerCharacter(h.database, id); err != nil {
@@ -607,14 +607,14 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 		OverridesID *int64 `json:"overrides_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Text == "" {
-		writeError(w, http.StatusBadRequest, "invalid request")
+		writeError(w, http.StatusBadRequest, "本文を入力してください")
 		return
 	}
 	// Only houserule and correction can be created via API
 	priorityMap := map[string]int{"houserule": 20, "correction": 10}
 	priority, ok := priorityMap[req.SourceType]
 	if !ok {
-		writeError(w, http.StatusBadRequest, "source_type must be houserule or correction")
+		writeError(w, http.StatusBadRequest, "追加できるのはハウスルールか訂正だけです")
 		return
 	}
 	id, err := db.InsertRAGChunk(h.database, db.RAGChunk{
@@ -642,7 +642,7 @@ func (h *Handler) handleCreateRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	var req struct {
@@ -651,7 +651,7 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 		Enabled bool   `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	if err := db.UpdateRAGChunk(h.database, id, req.Text, req.Tag, req.Enabled); err != nil {
@@ -665,7 +665,7 @@ func (h *Handler) handleUpdateRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if h.rag != nil {
@@ -682,7 +682,7 @@ func (h *Handler) handleDeleteRule(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleDeleteCheckpoint(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	if _, err := h.database.Exec(`DELETE FROM checkpoints WHERE id = ?`, id); err != nil {
@@ -725,12 +725,12 @@ func (h *Handler) handleListScenarios(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) handleGetScenario(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	s, err := db.GetScenario(h.database, id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "scenario not found")
+		writeError(w, http.StatusNotFound, "シナリオが見つかりません")
 		return
 	}
 	images, _ := db.ListScenarioImages(h.database, id)
@@ -786,19 +786,19 @@ func (h *Handler) handleListBackgrounds(w http.ResponseWriter, r *http.Request) 
 func (h *Handler) handleServeScenarioImage(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	imgID, err := strconv.ParseInt(r.PathValue("imgid"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid imgid")
+		writeError(w, http.StatusBadRequest, "画像 ID が正しくありません")
 		return
 	}
 	row := h.database.QueryRow(
 		`SELECT file_path FROM scenario_images WHERE id=? AND scenario_id=?`, imgID, id)
 	var filePath string
 	if err := row.Scan(&filePath); err != nil {
-		writeError(w, http.StatusNotFound, "image not found")
+		writeError(w, http.StatusNotFound, "画像が見つかりません")
 		return
 	}
 	http.ServeFile(w, r, filePath)
@@ -807,19 +807,19 @@ func (h *Handler) handleServeScenarioImage(w http.ResponseWriter, r *http.Reques
 func (h *Handler) handleUpdateScenarioStatus(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid id")
+		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
 	var req struct {
 		Status string `json:"status"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeError(w, http.StatusBadRequest, "invalid JSON")
+		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
 	valid := map[string]bool{"draft": true, "ready": true, "used": true}
 	if !valid[req.Status] {
-		writeError(w, http.StatusBadRequest, "status must be draft|ready|used")
+		writeError(w, http.StatusBadRequest, "status は draft / ready / used のいずれかです")
 		return
 	}
 	if err := db.UpdateScenarioStatus(h.database, id, req.Status); err != nil {

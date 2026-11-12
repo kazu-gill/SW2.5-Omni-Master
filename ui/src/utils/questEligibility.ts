@@ -31,8 +31,8 @@ export const ELIGIBILITY_LABEL: Record<Eligibility, string> = {
 }
 
 export const ELIGIBILITY_COLOR: Record<Eligibility, string> = {
-  ok:      'var(--green)',
-  caution: 'var(--amber)',
-  hard:    'var(--red)',
-  unknown: 'var(--text-dim)',
+  ok:      'var(--ok)',
+  caution: 'var(--warn)',
+  hard:    'var(--danger)',
+  unknown: 'var(--muted)',
 }

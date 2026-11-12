@@ -1,17 +1,74 @@
-export interface NPCAction {
-  Name: string
-  Action: string
-  Dice: string
-  Target: string
-  Dialogue: string
-  HPDelta: number
-  MPCost: number
-  NewLane?: string
+// API の型。docs/api.md と同じ形 (JSON は snake_case)。
+
+export type Lane = 'enemy' | 'front' | 'party'
+export type TurnMode = 'action' | 'gm'
+
+// ── システム ────────────────────────────────────────────────────────────────
+export interface ServiceStatus {
+  url: string
+  model_id?: string
+  ok: boolean
 }
 
-export interface FormationChange {
+export interface SystemStatus {
+  llm: ServiceStatus
+  embed: ServiceStatus
+  images: ServiceStatus
+  apc_tenant: string
+}
+
+// ── セッション ──────────────────────────────────────────────────────────────
+export interface Session {
+  id: number
+  title: string
+  quest_id: number | null
+  turn: number
+  created_at: string
+  updated_at: string
+}
+
+export interface SessionSummary extends Session {
+  quest_title: string
+  last_line: string
+}
+
+export interface Checkpoint {
+  turn: number
+  created_at: string
+}
+
+export interface SessionState {
+  session: Session
+  quest: QuestEntry | null
+  pc: PlayerCharacterEntry | null
+  npc_sheets: NPCSheet[]
+  turns: TurnResult[]
+  checkpoints: Checkpoint[]
+  summary: string[]
+  busy: boolean
+}
+
+export interface NPCSheet {
+  id: number
+  session_id: number
   name: string
-  new_lane: string
+  hp: number
+  mp: number
+  hp_max: number
+  mp_max: number
+  lane: Lane
+  yaml_blob: string
+}
+
+// ── ターン ──────────────────────────────────────────────────────────────────
+export interface NPCAction {
+  name: string
+  action: string
+  dialogue: string
+  mp_cost: number
+  hp_delta: number
+  new_lane?: Lane
+  check?: string
 }
 
 export interface ResourceDelta {
@@ -20,133 +77,78 @@ export interface ResourceDelta {
   mp_cost: number
 }
 
+export interface FormationChange {
+  name: string
+  new_lane: Lane
+}
+
+export type CheckOutcome = 'success' | 'failure' | 'auto_success' | 'auto_failure'
+
+export interface Check {
+  who: string
+  kind: string
+  base: number
+  target: number
+  dice: [number, number]
+  total: number
+  result: CheckOutcome
+}
+
+export interface RuleHit {
+  id: number
+  source_type: RuleSource
+  section: string
+  page_from: number
+  page_to: number
+  text: string
+  score: number
+  matched_term?: string
+}
+
 export interface TurnResult {
   session_id: number
   turn: number
+  mode: TurnMode
+  input: string
   gm_narration: string
   npc_actions: NPCAction[]
   deltas: ResourceDelta[]
-  formation_changes?: FormationChange[]
+  formation_changes: FormationChange[]
+  checks: Check[]
+  rules_used: RuleHit[]
+  stage_attempts: Record<string, number>
+  warnings: string[]
   image_url?: string
-  /** LLM calls per stage ("gm", "npc:<name>", "support"); more than 1 means it was re-thought */
-  stage_attempts?: Record<string, number>
-  /** Stages that never validated and were skipped or fell back */
-  warnings?: string[]
+  created_at: string
 }
 
-export interface NPCSheet {
-  ID: number
-  SessionID: number
-  Name: string
-  HP: number
-  MP: number
-  PositionX: number
-  PositionY: number
-  YAMLBlob: string
+// ── WebSocket ───────────────────────────────────────────────────────────────
+export type StageStatus = 'start' | 'retry' | 'done' | 'failed' | 'skipped'
+
+export type WsMessage =
+  | { type: 'stage'; session_id: number; turn: number; stage: string; label: string; status: StageStatus; attempt: number; message?: string }
+  | { type: 'delta'; session_id: number; turn: number; stage: string; text: string }
+  | { type: 'rules'; session_id: number; turn: number; stage: string; rules: RuleHit[] }
+  | { type: 'check'; session_id: number; turn: number; check: Check }
+  | { type: 'turn'; session_id: number; result: TurnResult }
+  | { type: 'error'; session_id: number; turn: number; message: string }
+  | { type: 'image'; session_id: number; turn: number; url: string }
+  | { type: 'busy'; session_id: number; busy: boolean }
+
+// ── パーティ・PC ────────────────────────────────────────────────────────────
+export interface PersonaInfo {
+  id: string
+  name: string
+  hp: number
+  mp: number
 }
 
-export interface Checkpoint {
-  ID: number
-  SessionID: number
-  Turn: number
-  SnapshotJSON: string
-  CreatedAt: string
-}
-
-export interface SessionLog {
+export interface PlayerCharacterEntry {
   id: number
-  turn: number
-  role: 'player' | 'gm' | 'npc' | 'support'
-  content: string
-}
-
-export interface RuleEntry {
-  id: number
-  source_type: 'rulebook' | 'correction' | 'houserule'
-  priority: number
-  tag: string
-  text: string
-  overrides_id: number | null
-  enabled: boolean
-  /** 部 > 章 > 見出し (ルールブックから取り込んだもの) */
-  section?: string
-  /** 本のページ */
-  page_from?: number
-  page_to?: number
-}
-
-export interface NPCSkill {
   name: string
-  rank: number
-  type: 'combat' | 'magic' | 'general'
-  note: string
+  json_blob: string
+  is_active: boolean
 }
-
-export interface NPCConsumable {
-  name: string
-  cur: number
-  max: number
-}
-
-export interface NPCPersona {
-  personality: string
-  motivation: string
-  speech: string
-  priorities: string[]
-  forbidden: string[]
-}
-
-export interface NPC {
-  name: string
-  icon: string
-  class: string
-  race?: string
-  lv?: number
-  hp: [number, number]
-  mp: [number, number]
-  attrs?: { STR: number; AGI: number; DEX: number; INT: number; SPR: number; LUC: number }
-  skills?: NPCSkill[]
-  equip?: { 武器: string; 防具: string; 盾: string; 装飾: string }
-  consumables?: NPCConsumable[]
-  inventory?: { name: string; qty: number; note: string }[]
-  status: string
-  position: string
-  persona?: NPCPersona
-}
-
-export interface PortraitEntry {
-  name: string
-  prompt: string
-  seed: number | null
-  generated: boolean
-  dataUrl: string | null
-}
-
-export interface AlbumEntry {
-  id: number
-  note: string
-  source: 'comfyui' | 'upload'
-  seed: number | null
-  date: string
-  active: boolean
-  dataUrl: string | null
-}
-
-export interface EnemyEntry {
-  name: string
-  status: string
-  analyzed: boolean
-  hpPct: number | null
-  data: Record<string, string | null>
-}
-
-export interface ImageUpdate {
-  session_id: number
-  turn: number
-  image_url: string
-}
-
-// ── Player Character (ゆとシート互換) ───────────────────────────────────────
 
 export interface PCAttr {
   base: number    // 種族基本値
@@ -160,10 +162,10 @@ export interface PCClass {
 
 export interface PCWeapon {
   name: string
-  style: string   // 武器種別・流派
-  hit: string     // 命中修正
-  damage: string  // ダメージ
-  range: string   // 射程
+  style: string
+  hit: string
+  damage: string
+  range: string
   note: string
 }
 
@@ -173,8 +175,8 @@ export interface PCItem {
   note: string
 }
 
+/** ゆとシート風の PC シート (player_characters.json_blob の中身) */
 export interface PCSheet {
-  // 基本情報
   name: string
   race: string
   gender: string
@@ -184,44 +186,31 @@ export interface PCSheet {
   birthplace: string
   adventurerLevel: number
   exp: number
-  // 能力値
   attrs: {
-    dex: PCAttr   // 器用度
-    agi: PCAttr   // 敏捷度
-    str: PCAttr   // 筋力
-    vit: PCAttr   // 生命力
-    int: PCAttr   // 知力
-    spr: PCAttr   // 精神力
+    dex: PCAttr
+    agi: PCAttr
+    str: PCAttr
+    vit: PCAttr
+    int: PCAttr
+    spr: PCAttr
   }
-  // HP/MP
   hpCurrent: number
   hpMax: number
   mpCurrent: number
   mpMax: number
-  // 技能
   classes: PCClass[]
-  // 戦闘特技
   combatFeats: string
-  // 装備
   weapons: PCWeapon[]
   armor: string
   shield: string
   accessories: string
-  // 所持品
   inventory: PCItem[]
-  // 金銭・言語・特記
   gold: number
   languages: string
   notes: string
 }
 
-export interface PlayerCharacterEntry {
-  id: number
-  name: string
-  json_blob: string
-  is_active: boolean
-}
-
+// ── クエスト ────────────────────────────────────────────────────────────────
 export interface QuestEntry {
   id: number
   rank: 'S' | 'A' | 'B' | 'C'
@@ -231,17 +220,31 @@ export interface QuestEntry {
   reward: string
   target: string
   level: string
-  tags: string        // comma-separated
+  tags: string // カンマ区切り
   status: 'available' | 'active' | 'completed'
 }
 
-export type ViewName = 'start' | 'session' | 'quest' | 'npc' | 'rules'
-export type SocketStatus = 'connecting' | 'connected' | 'disconnected'
+// ── ルール ──────────────────────────────────────────────────────────────────
+export type RuleSource = 'rulebook' | 'correction' | 'houserule'
 
-export interface ChatEntry {
-  role: 'player' | 'gm' | 'npc' | 'system'
-  speaker: string
-  content: string
-  turn: number
-  image_url?: string
+export interface RuleEntry {
+  id: number
+  source_type: RuleSource
+  priority: number
+  tag: string
+  text: string
+  overrides_id: number | null
+  enabled: boolean
+  section?: string
+  page_from?: number
+  page_to?: number
+  /** POST の返り値だけにある。false なら埋め込みに失敗 (RAG で見つからない) */
+  embedded?: boolean
 }
+
+export interface RulePage {
+  total: number
+  items: RuleEntry[]
+}
+
+export type ViewName = 'session' | 'quest' | 'party' | 'rules'
