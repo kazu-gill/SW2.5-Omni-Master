@@ -178,11 +178,24 @@ func TestResumeDoesNotRerollDice(t *testing.T) {
 	replies[1] = llm.Result{Text: npcYAML("A") + "\ncheck: 命中力判定 基準値5 目標値10", FinishReason: "stop"}
 
 	var nu, ns int
-	_, _, _, want := uninterrupted(t, replies, countingDice(&nu))
-	e, _, sid := stopped(t, replies, countingDice(&ns), 3)
+	_, u, _, want := uninterrupted(t, replies, countingDice(&nu))
+	e, m, sid := stopped(t, replies, countingDice(&ns), 3)
 	res, err := e.ResumeTurn(context.Background(), sid, nil)
 	if err != nil {
 		t.Fatalf("ResumeTurn: %v", err)
+	}
+	// The restored facts reach B's and Support's instructions unchanged.
+	got := withoutFailed(m)
+	if len(got) != len(u.calls) {
+		t.Fatalf("%d calls, want %d", len(got), len(u.calls))
+	}
+	for i := range got {
+		if !reflect.DeepEqual(got[i].msgs, u.calls[i].msgs) {
+			t.Errorf("call %d differs from the uninterrupted turn:\ngot  %+v\nwant %+v", i, got[i].msgs, u.calls[i].msgs)
+		}
+	}
+	if !strings.Contains(lastContent(got[2].msgs), "【判定結果（システムが振ったサイコロ）】") {
+		t.Error("NPC B's instruction should carry the checks rolled before the stop")
 	}
 	if ns != nu || nu != 4 {
 		t.Errorf("d6 called %d times with a resume, %d without; want both 4", ns, nu)
