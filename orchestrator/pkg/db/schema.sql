@@ -116,6 +116,18 @@ CREATE TABLE IF NOT EXISTS turn_results (
     PRIMARY KEY (session_id, turn)
 );
 
+-- 途中のターンの進捗（止まったターンを最後に終えた段から再開するため。1 セッション 1 行）
+CREATE TABLE IF NOT EXISTS turn_progress (
+    session_id  INTEGER PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+    turn        INTEGER NOT NULL,
+    input       TEXT    NOT NULL DEFAULT '',
+    mode        TEXT    NOT NULL DEFAULT '',
+    state_json  TEXT    NOT NULL DEFAULT '',
+    status      TEXT    NOT NULL DEFAULT 'running', -- 'running' | 'stopped'
+    error       TEXT    NOT NULL DEFAULT '',
+    updated_at  DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE INDEX IF NOT EXISTS idx_session_logs_session_turn ON session_logs(session_id, turn);
 CREATE INDEX IF NOT EXISTS idx_checkpoints_session_turn  ON checkpoints(session_id, turn);
 CREATE INDEX IF NOT EXISTS idx_turn_results_session      ON turn_results(session_id, turn);

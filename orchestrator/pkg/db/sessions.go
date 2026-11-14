@@ -277,6 +277,7 @@ func deleteTurnsFrom(d execer, sessionID int64, turn int, withCheckpoints bool) 
 		`DELETE FROM session_logs WHERE session_id = ? AND turn >= ?`,
 		`DELETE FROM turn_results WHERE session_id = ? AND turn >= ?`,
 		`DELETE FROM session_summaries WHERE session_id = ? AND upto_turn >= ?`,
+		`DELETE FROM turn_progress WHERE session_id = ? AND turn >= ?`,
 	}
 	if withCheckpoints {
 		stmts = append(stmts, `DELETE FROM checkpoints WHERE session_id = ? AND turn >= ?`)
