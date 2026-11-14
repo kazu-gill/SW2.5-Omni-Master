@@ -98,7 +98,7 @@ WS  image  (数ターンごと、後から)
 | `rules` | `turn`, `stage`, `rules: [RuleHit]` | その段に渡したルール |
 | `check` | `turn`, `check: Check` | 判定の結果 |
 | `turn` | `result: TurnResult` | ターン確定 |
-| `error` | `turn`, `message`, `resumable`? | ターンが失敗した。`resumable: true` なら途中まで残っていて `/resume` で続けられる (無ければ状態は開始前に戻っている) |
+| `error` | `turn`, `message`, `resumable` | ターンが失敗した。`resumable: true` なら途中まで残っていて `/resume` で続けられる。false なら状態は開始前に戻っている (再開中にパーティの変化が分かったときだけは止まったターンが残り、`/discard` で取り消す) |
 | `image` | `turn`, `url` | シーン画像ができた |
 | `busy` | `busy: bool` | ターンの実行状態 (他のタブ向け) |
 

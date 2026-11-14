@@ -119,11 +119,9 @@ func (h *Handler) startTurn(sessionID int64, prepare func() (int, error), play t
 		result, err := play(ctx, turn, ev)
 		if err != nil {
 			resumable := h.keepStoppedTurn(sessionID, turn, err)
-			msg := map[string]any{"type": "error", "turn": turn, "message": turnErrorMessage(ctx, err, resumable)}
-			if resumable {
-				msg["resumable"] = true
-			}
-			h.send(sessionID, msg)
+			h.send(sessionID, map[string]any{
+				"type": "error", "turn": turn, "message": turnErrorMessage(ctx, err, resumable), "resumable": resumable,
+			})
 			return
 		}
 		_ = db.TouchSession(h.database, sessionID)
@@ -143,7 +141,9 @@ func (h *Handler) startTurn(sessionID int64, prepare func() (int, error), play t
 
 // keepStoppedTurn decides what stays of a failed turn. The engine has marked
 // the turn's progress row stopped if it got that far: then the turn stays to
-// be resumed (true). Otherwise the session goes back to the start of the turn.
+// be resumed (true), unless the party changed since it stopped: the row
+// stays for /discard but it cannot be resumed (false). Otherwise the session
+// goes back to the start of the turn.
 func (h *Handler) keepStoppedTurn(sessionID int64, turn int, err error) bool {
 	p, perr := db.GetTurnProgress(h.database, sessionID)
 	if perr == nil && p != nil && p.Turn == turn {
@@ -152,7 +152,7 @@ func (h *Handler) keepStoppedTurn(sessionID int64, turn int, err error) bool {
 				log.Printf("[turn] session %d: %v", sessionID, merr)
 			}
 		}
-		return true
+		return !errors.Is(err, game.ErrPartyChanged)
 	}
 	if rerr := db.RestoreBeforeTurn(h.database, sessionID, turn); rerr != nil {
 		_ = db.DeleteTurnsFrom(h.database, sessionID, turn)
@@ -200,6 +200,20 @@ func (h *Handler) stoppedTurn(sessionID int64) (*db.TurnProgress, error) {
 		return nil, err
 	}
 	return p, nil
+}
+
+// checkNotStopped returns errStopped when the session has a stopped turn.
+// A turn's prepare calls it under the reservation, so a turn that stopped
+// just before cannot be overwritten.
+func (h *Handler) checkNotStopped(sessionID int64) error {
+	p, err := h.stoppedTurn(sessionID)
+	if err != nil {
+		return err
+	}
+	if p != nil {
+		return errStopped
+	}
+	return nil
 }
 
 // refuseIfStopped writes 409 and returns true when the session has a stopped
@@ -564,10 +578,10 @@ func (h *Handler) handleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `mode は "action" か "gm" です`)
 		return
 	}
-	if h.refuseIfStopped(w, s.ID) {
-		return
-	}
 	turn, err := h.startTurn(s.ID, func() (int, error) {
+		if err := h.checkNotStopped(s.ID); err != nil {
+			return 0, err
+		}
 		latest, err := db.LatestTurn(h.database, s.ID)
 		return latest + 1, err
 	}, h.newTurn(s.ID, req.Text, mode))
@@ -594,7 +608,7 @@ func validMode(m string) (string, bool) {
 
 func (h *Handler) respondStarted(w http.ResponseWriter, turn int, err error) {
 	switch {
-	case errors.Is(err, errBusy), errors.Is(err, game.ErrPartyChanged):
+	case errors.Is(err, errBusy), errors.Is(err, errStopped), errors.Is(err, game.ErrPartyChanged):
 		writeError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, game.ErrNoStoppedTurn):
 		writeError(w, http.StatusNotFound, err.Error())
@@ -635,6 +649,8 @@ func (h *Handler) handleRedo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The stopped turn itself too: discard it, then send the new input.
+	// (Checked here so a stopped turn without a result is 409, not 404, and
+	// again in prepare under the reservation.)
 	if h.refuseIfStopped(w, s.ID) {
 		return
 	}
@@ -648,6 +664,9 @@ func (h *Handler) handleRedo(w http.ResponseWriter, r *http.Request) {
 		text = *req.Text
 	}
 	turn, err := h.startTurn(s.ID, func() (int, error) {
+		if err := h.checkNotStopped(s.ID); err != nil {
+			return 0, err
+		}
 		if err := db.RestoreBeforeTurn(h.database, s.ID, req.Turn); err != nil {
 			return 0, fmt.Errorf("ターン %d の開始時点に戻せませんでした（チェックポイントは最新 10 件だけ残ります）: %w", req.Turn, err)
 		}

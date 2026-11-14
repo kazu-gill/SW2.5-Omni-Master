@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -630,5 +631,52 @@ func TestFailureBeforeProgressRestores(t *testing.T) {
 	}
 	if st := getState(t, srv, sid); st["stopped_turn"] != nil {
 		t.Errorf("stopped_turn = %v", st["stopped_turn"])
+	}
+}
+
+func TestTurnPrepareRefusesStopped(t *testing.T) {
+	m := newStageLLM(t)
+	h, srv, sid := setupHandlerLLM(t, m.srv.URL)
+	read := dialSession(t, srv, sid)
+	read("busy")
+	stopAtNPC(t, m, srv, sid, read)
+	// The check runs under the reservation, not only before it.
+	_, err := h.startTurn(sid, func() (int, error) { return 0, h.checkNotStopped(sid) }, h.newTurn(sid, "x", game.ModeAction))
+	if !errors.Is(err, errStopped) {
+		t.Errorf("err = %v, want errStopped", err)
+	}
+	rec := httptest.NewRecorder()
+	h.respondStarted(rec, 0, err)
+	if rec.Code != http.StatusConflict {
+		t.Errorf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestPartyChangedIsNotResumable(t *testing.T) {
+	m := newStageLLM(t)
+	h, srv, sid := setupHandlerLLM(t, m.srv.URL)
+	read := dialSession(t, srv, sid)
+	read("busy")
+	stopAtNPC(t, m, srv, sid, read)
+	if h.keepStoppedTurn(sid, 1, game.ErrPartyChanged) {
+		t.Error("a party change must not be reported as resumable")
+	}
+	if stoppedTurn(t, getState(t, srv, sid)) == nil {
+		t.Error("the stopped turn should stay for discard")
+	}
+	if msg := turnErrorMessage(context.Background(), game.ErrPartyChanged, false); msg != game.ErrPartyChanged.Error() {
+		t.Errorf("message = %q", msg)
+	}
+}
+
+func TestNPCSheetAddDeleteRefusedWhileBusy(t *testing.T) {
+	h, srv, sid := setupHandler(t)
+	h.turns.running[sid] = &runningTurn{turn: 1, cancel: func() {}}
+	defer delete(h.turns.running, sid)
+	if resp := doJSON(t, http.MethodPost, srv.URL+"/api/npc-sheet", map[string]any{"session_id": sid, "persona_id": "gard"}); resp.StatusCode != http.StatusConflict {
+		t.Errorf("add while busy: status = %d, want 409", resp.StatusCode)
+	}
+	if resp := doJSON(t, http.MethodDelete, srv.URL+"/api/npc-sheet", map[string]any{"session_id": sid, "name": "ガルド"}); resp.StatusCode != http.StatusConflict {
+		t.Errorf("delete while busy: status = %d, want 409", resp.StatusCode)
 	}
 }

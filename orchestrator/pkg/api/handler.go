@@ -290,6 +290,10 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
+	if h.turns.busy(req.SessionID) {
+		writeError(w, http.StatusConflict, errBusy.Error())
+		return
+	}
 	if h.refuseIfStopped(w, req.SessionID) {
 		return
 	}
@@ -356,6 +360,10 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
+		return
+	}
+	if h.turns.busy(req.SessionID) {
+		writeError(w, http.StatusConflict, errBusy.Error())
 		return
 	}
 	if h.refuseIfStopped(w, req.SessionID) {
