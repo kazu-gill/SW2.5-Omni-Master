@@ -102,10 +102,6 @@ func (h *Handler) startTurn(sessionID int64, text, mode string, prepare func() (
 			h.send(sessionID, map[string]any{"type": "error", "turn": turn, "message": turnErrorMessage(ctx, err)})
 			return
 		}
-		b, _ := json.Marshal(result)
-		if err := db.SaveTurnResult(h.database, sessionID, turn, string(b)); err != nil {
-			log.Printf("[turn] save failed: %v", err)
-		}
 		_ = db.TouchSession(h.database, sessionID)
 		h.send(sessionID, map[string]any{"type": "turn", "result": result})
 

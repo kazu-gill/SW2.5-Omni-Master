@@ -2,6 +2,7 @@ package game
 
 import (
 	"context"
+	"encoding/json"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -191,5 +192,43 @@ func TestParseResourceDeltas(t *testing.T) {
 				t.Errorf("wantErr=%v, got err=%v", tt.wantErr, err)
 			}
 		})
+	}
+}
+
+func TestNextSheetsLaneChangeKeepsDelta(t *testing.T) {
+	sheets := []db.NPCSheet{{Name: "ガルド", HP: 30, MP: 15, PositionY: 7}}
+	actions := []NPCAction{{Name: "ガルド", NewLane: "front"}}
+	deltas := []ResourceDelta{{NPCName: "ガルド", HPDelta: -5, MPCost: 3}}
+
+	got, changes := nextSheets(deltas, actions, sheets)
+	if len(got) != 1 || got[0].HP != 25 || got[0].MP != 12 || got[0].PositionY != 4 {
+		t.Errorf("sheet = %+v, want HP 25 MP 12 PositionY 4", got)
+	}
+	if len(changes) != 1 || changes[0].NewLane != "front" {
+		t.Errorf("changes = %+v", changes)
+	}
+	if sheets[0].HP != 30 || sheets[0].PositionY != 7 {
+		t.Errorf("input sheets were modified: %+v", sheets[0])
+	}
+}
+
+func TestProcessTurnSavesTurnResult(t *testing.T) {
+	npcYAML := "name: ガルド\naction: 攻撃\ndialogue: いくぞ！\nmp_cost: 3\nhp_delta: -5"
+	engine, sessionID := setupEngine(t, npcYAML)
+
+	if _, err := engine.ProcessTurn(context.Background(), PlayerInput{SessionID: sessionID, Turn: 1, Text: "攻撃"}, nil); err != nil {
+		t.Fatalf("ProcessTurn: %v", err)
+	}
+	rows, err := db.ListTurnResults(engine.db, sessionID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("turn_results = %v, %v; want 1 row", rows, err)
+	}
+	var tr TurnResult
+	if err := json.Unmarshal([]byte(rows[0]), &tr); err != nil || tr.Turn != 1 || len(tr.Deltas) != 1 {
+		t.Errorf("stored = %+v, %v", tr, err)
+	}
+	sheets, _ := db.GetNPCSheets(engine.db, sessionID)
+	if sheets[0].HP != 25 || sheets[0].MP != 12 {
+		t.Errorf("sheet = %+v, want HP 25 MP 12", sheets[0])
 	}
 }

@@ -96,6 +96,9 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 	}
 	run.tr.GMNarration = gmNarration
 	if input.Mode == ModeGM {
+		if err := run.finish(nil); err != nil {
+			return nil, fmt.Errorf("finish turn: %w", err)
+		}
 		return run.tr, nil
 	}
 
@@ -111,10 +114,11 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 	}
 	run.tr.Deltas = append(run.tr.Deltas, deltas...)
 
-	if err := e.applyDeltas(deltas, sheets); err != nil {
-		return nil, fmt.Errorf("apply deltas: %w", err)
+	next, changes := nextSheets(deltas, npcActions, sheets)
+	run.tr.FormationChanges = append(run.tr.FormationChanges, changes...)
+	if err := run.finish(next); err != nil {
+		return nil, fmt.Errorf("finish turn: %w", err)
 	}
-	run.tr.FormationChanges = append(run.tr.FormationChanges, e.applyFormationChanges(npcActions, sheets)...)
 	return run.tr, nil
 }
 
@@ -409,10 +413,22 @@ func laneToPositionY(lane string) (int, bool) {
 	}
 }
 
-func (e *Engine) applyFormationChanges(actions []NPCAction, sheets []db.NPCSheet) []FormationChange {
-	sheetMap := make(map[string]db.NPCSheet, len(sheets))
-	for _, s := range sheets {
-		sheetMap[s.Name] = s
+// nextSheets applies deltas, then lane changes, to copies of sheets. HP and
+// MP stop at 0. Both changes land on the same copy, so a lane change keeps
+// the HP / MP the deltas just set.
+func nextSheets(deltas []ResourceDelta, actions []NPCAction, sheets []db.NPCSheet) ([]db.NPCSheet, []FormationChange) {
+	next := append([]db.NPCSheet(nil), sheets...)
+	idx := make(map[string]int, len(next))
+	for i, s := range next {
+		idx[s.Name] = i
+	}
+	for _, d := range deltas {
+		i, ok := idx[d.NPCName]
+		if !ok {
+			continue
+		}
+		next[i].HP = max(0, next[i].HP+d.HPDelta)
+		next[i].MP = max(0, next[i].MP-d.MPCost)
 	}
 	var changes []FormationChange
 	for _, a := range actions {
@@ -423,41 +439,22 @@ func (e *Engine) applyFormationChanges(actions []NPCAction, sheets []db.NPCSheet
 		if !ok {
 			continue
 		}
-		s, ok := sheetMap[a.Name]
-		if !ok {
-			continue
+		i, ok := idx[a.Name]
+		if !ok || positionToLane(next[i].PositionY) == a.NewLane {
+			continue // unknown NPC, or no actual change
 		}
-		if positionToLane(s.PositionY) == a.NewLane {
-			continue // no actual change
-		}
-		s.PositionY = newY
-		_ = db.UpsertNPCSheet(e.db, s)
+		next[i].PositionY = newY
 		changes = append(changes, FormationChange{Name: a.Name, NewLane: a.NewLane})
 	}
-	return changes
+	return next, changes
 }
 
-func (e *Engine) applyDeltas(deltas []ResourceDelta, sheets []db.NPCSheet) error {
-	sheetMap := make(map[string]db.NPCSheet, len(sheets))
-	for _, s := range sheets {
-		sheetMap[s.Name] = s
+// finish closes the turn in one transaction: the sheets, the turn's result
+// and the end of its progress row are written together or not at all.
+func (r *turnRun) finish(sheets []db.NPCSheet) error {
+	b, err := json.Marshal(r.tr)
+	if err != nil {
+		return fmt.Errorf("marshal turn result: %w", err)
 	}
-	for _, d := range deltas {
-		s, ok := sheetMap[d.NPCName]
-		if !ok {
-			continue
-		}
-		s.HP += d.HPDelta
-		s.MP -= d.MPCost
-		if s.HP < 0 {
-			s.HP = 0
-		}
-		if s.MP < 0 {
-			s.MP = 0
-		}
-		if err := db.UpsertNPCSheet(e.db, s); err != nil {
-			return err
-		}
-	}
-	return nil
+	return db.FinishTurn(r.e.db, r.tr.SessionID, r.tr.Turn, sheets, string(b))
 }
