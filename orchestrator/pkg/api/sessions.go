@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -59,10 +60,33 @@ func (tr *turnRunner) busy(sessionID int64) bool {
 
 var errBusy = errors.New("このセッションではターンを処理中です。終わるまで待つか、中断してください。")
 
+// hold reserves the session for a short change that must not overlap a turn
+// (discarding a stopped turn). It returns the release.
+func (tr *turnRunner) hold(sessionID int64) (func(), error) {
+	tr.mu.Lock()
+	defer tr.mu.Unlock()
+	if tr.running[sessionID] != nil {
+		return nil, errBusy
+	}
+	tr.running[sessionID] = &runningTurn{cancel: func() {}}
+	return func() {
+		tr.mu.Lock()
+		delete(tr.running, sessionID)
+		tr.mu.Unlock()
+	}, nil
+}
+
+// turnFunc plays a turn: a new one (ProcessTurn) or a stopped one (ResumeTurn).
+type turnFunc func(ctx context.Context, turn int, ev game.Events) (*game.TurnResult, error)
+
 // startTurn reserves the session, then runs the turn in the background.
 // prepare runs under the reservation and returns the turn number; it is where
-// a redo rewinds the session first.
-func (h *Handler) startTurn(sessionID int64, text, mode string, prepare func() (int, error)) (int, error) {
+// a redo rewinds the session first and a resume checks the stopped turn.
+//
+// When the turn fails after its progress row exists, the row stays (stopped)
+// and the error says so (resumable): /resume continues it, /discard drops it.
+// A failure before that puts the session back to the start of the turn.
+func (h *Handler) startTurn(sessionID int64, prepare func() (int, error), play turnFunc) (int, error) {
 	tr := h.turns
 	tr.mu.Lock()
 	if tr.running[sessionID] != nil {
@@ -91,15 +115,15 @@ func (h *Handler) startTurn(sessionID int64, text, mode string, prepare func() (
 
 	go func() {
 		defer release()
-		input := game.PlayerInput{SessionID: sessionID, Turn: turn, Text: text, Mode: mode}
 		ev := wsEvents{h: h, sessionID: sessionID}
-		result, err := h.engine.ProcessTurn(ctx, input, ev)
+		result, err := play(ctx, turn, ev)
 		if err != nil {
-			// Nothing of a failed turn stays: put the session back to its start.
-			if rerr := db.RestoreBeforeTurn(h.database, sessionID, turn); rerr != nil {
-				_ = db.DeleteTurnsFrom(h.database, sessionID, turn)
+			resumable := h.keepStoppedTurn(sessionID, turn, err)
+			msg := map[string]any{"type": "error", "turn": turn, "message": turnErrorMessage(ctx, err, resumable)}
+			if resumable {
+				msg["resumable"] = true
 			}
-			h.send(sessionID, map[string]any{"type": "error", "turn": turn, "message": turnErrorMessage(ctx, err)})
+			h.send(sessionID, msg)
 			return
 		}
 		_ = db.TouchSession(h.database, sessionID)
@@ -110,23 +134,195 @@ func (h *Handler) startTurn(sessionID int64, text, mode string, prepare func() (
 		if _, err := h.engine.MaybeSummarize(ctx, sessionID, ev); err != nil {
 			log.Printf("[summary] session %d: %v", sessionID, err)
 		}
-		if h.images != nil && mode == game.ModeAction {
+		if h.images != nil && result.Mode == game.ModeAction {
 			go h.makeSceneImage(sessionID, turn, result)
 		}
 	}()
 	return turn, nil
 }
 
-func turnErrorMessage(ctx context.Context, err error) string {
+// keepStoppedTurn decides what stays of a failed turn. The engine has marked
+// the turn's progress row stopped if it got that far: then the turn stays to
+// be resumed (true). Otherwise the session goes back to the start of the turn.
+func (h *Handler) keepStoppedTurn(sessionID int64, turn int, err error) bool {
+	p, perr := db.GetTurnProgress(h.database, sessionID)
+	if perr == nil && p != nil && p.Turn == turn {
+		if p.Status != db.ProgressStopped { // the engine could not mark it
+			if merr := db.MarkTurnStopped(h.database, sessionID, err.Error()); merr != nil {
+				log.Printf("[turn] session %d: %v", sessionID, merr)
+			}
+		}
+		return true
+	}
+	if rerr := db.RestoreBeforeTurn(h.database, sessionID, turn); rerr != nil {
+		_ = db.DeleteTurnsFrom(h.database, sessionID, turn)
+	}
+	return false
+}
+
+func turnErrorMessage(ctx context.Context, err error, resumable bool) string {
+	state := "状態は開始前に戻っています"
+	if resumable {
+		state = "途中まで残っています。続きから再開できます"
+	}
 	switch {
+	case errors.Is(err, game.ErrPartyChanged), errors.Is(err, game.ErrNoStoppedTurn):
+		return err.Error()
 	case errors.Is(ctx.Err(), context.Canceled):
-		return "ターンを中断しました。状態はターンの開始前に戻っています。"
+		return "ターンを中断しました。" + state + "。"
 	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		return "ターンが時間内に終わらなかったため中止しました。状態は開始前に戻っています。LLM が混み合っていないか MLX ダッシュボードで確認してください。"
+		return "ターンが時間内に終わらなかったため中止しました。" + state + "。LLM が混み合っていないか MLX ダッシュボードで確認してください。"
 	case strings.Contains(err.Error(), "connection refused"):
+		if resumable {
+			return "LLM に接続できません。MLX ダッシュボードでチャット用モデルを起動してから、「続きから」で再開してください。"
+		}
 		return "LLM に接続できません。MLX ダッシュボードでチャット用モデルを起動してから、もう一度送ってください。"
 	}
-	return "ターンを処理できませんでした（状態は開始前に戻っています）: " + err.Error()
+	return "ターンを処理できませんでした（" + state + "）: " + err.Error()
+}
+
+// ── 止まったターン ───────────────────────────────────────────────────────────
+
+var errStopped = errors.New("止まったターンがあります。「続きから」か「取り消す」を先に選んでください")
+
+// stoppedState is the part of the engine's saved turn state the API reads.
+type stoppedState struct {
+	Done   []string        `json:"done"`
+	Result game.TurnResult `json:"result"`
+	NPCs   []string        `json:"npcs"`
+}
+
+// stoppedTurn returns the session's stopped turn, or nil if there is none
+// (a running row is a turn in progress, not a stopped one).
+func (h *Handler) stoppedTurn(sessionID int64) (*db.TurnProgress, error) {
+	p, err := db.GetTurnProgress(h.database, sessionID)
+	if err != nil || p == nil || p.Status != db.ProgressStopped {
+		return nil, err
+	}
+	return p, nil
+}
+
+// refuseIfStopped writes 409 and returns true when the session has a stopped
+// turn: it must be resumed or discarded before the session changes.
+func (h *Handler) refuseIfStopped(w http.ResponseWriter, sessionID int64) bool {
+	p, err := h.stoppedTurn(sessionID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return true
+	}
+	if p != nil {
+		writeError(w, http.StatusConflict, errStopped.Error())
+		return true
+	}
+	return false
+}
+
+// refuseIfAnyStopped is refuseIfStopped for what belongs to no session (PCs,
+// quests): a stopped turn in any session refuses it.
+func (h *Handler) refuseIfAnyStopped(w http.ResponseWriter) bool {
+	stopped, err := db.AnyStoppedTurn(h.database)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return true
+	}
+	if stopped {
+		writeError(w, http.StatusConflict, errStopped.Error())
+		return true
+	}
+	return false
+}
+
+func stoppedTurnJSON(p *db.TurnProgress) any {
+	if p == nil {
+		return nil
+	}
+	var st stoppedState
+	_ = json.Unmarshal([]byte(p.StateJSON), &st)
+	if st.Done == nil {
+		st.Done = []string{}
+	}
+	return map[string]any{
+		"turn": p.Turn, "input": p.Input, "mode": p.Mode, "error": p.Error,
+		"done": st.Done, "result": st.Result,
+	}
+}
+
+// handleResume continues the session's stopped turn from the stage that
+// stopped, reserved like a new turn.
+func (h *Handler) handleResume(w http.ResponseWriter, r *http.Request) {
+	s, ok := h.loadSession(w, r)
+	if !ok {
+		return
+	}
+	turn, err := h.startTurn(s.ID, func() (int, error) {
+		p, err := h.stoppedTurn(s.ID)
+		if err != nil {
+			return 0, err
+		}
+		if p == nil {
+			return 0, game.ErrNoStoppedTurn
+		}
+		// The engine checks this too; checking here answers at once.
+		var st stoppedState
+		if err := json.Unmarshal([]byte(p.StateJSON), &st); err != nil {
+			return 0, fmt.Errorf("turn state: %w", err)
+		}
+		sheets, err := db.GetNPCSheets(h.database, s.ID)
+		if err != nil {
+			return 0, err
+		}
+		if !slices.Equal(npcNames(sheets), st.NPCs) {
+			return 0, game.ErrPartyChanged
+		}
+		return p.Turn, nil
+	}, func(ctx context.Context, _ int, ev game.Events) (*game.TurnResult, error) {
+		return h.engine.ResumeTurn(ctx, s.ID, ev)
+	})
+	h.respondStarted(w, turn, err)
+}
+
+func npcNames(sheets []db.NPCSheet) []string {
+	names := make([]string, 0, len(sheets))
+	for _, s := range sheets {
+		names = append(names, s.Name)
+	}
+	return names
+}
+
+// handleDiscard drops the session's stopped turn: the session goes back to
+// the start of that turn, as a failed turn did before turns could resume.
+func (h *Handler) handleDiscard(w http.ResponseWriter, r *http.Request) {
+	s, ok := h.loadSession(w, r)
+	if !ok {
+		return
+	}
+	release, err := h.turns.hold(s.ID)
+	if err != nil {
+		writeError(w, http.StatusConflict, err.Error())
+		return
+	}
+	defer release()
+	p, err := h.stoppedTurn(s.ID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if p == nil {
+		writeError(w, http.StatusNotFound, game.ErrNoStoppedTurn.Error())
+		return
+	}
+	if err := db.RestoreBeforeTurn(h.database, s.ID, p.Turn); err != nil {
+		if err := db.DeleteTurnsFrom(h.database, s.ID, p.Turn); err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	if err := db.DeleteTurnProgress(h.database, s.ID); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	_ = db.TouchSession(h.database, s.ID)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // wsEvents forwards a turn's progress to the session's WebSocket clients.
@@ -329,6 +525,8 @@ func (h *Handler) handleGetSession(w http.ResponseWriter, r *http.Request) {
 		summary = []string{}
 	}
 	state["summary"] = summary
+	stopped, _ := h.stoppedTurn(s.ID)
+	state["stopped_turn"] = stoppedTurnJSON(stopped)
 	writeJSON(w, http.StatusOK, state)
 }
 
@@ -366,11 +564,22 @@ func (h *Handler) handleSessionTurn(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, `mode は "action" か "gm" です`)
 		return
 	}
-	turn, err := h.startTurn(s.ID, req.Text, mode, func() (int, error) {
+	if h.refuseIfStopped(w, s.ID) {
+		return
+	}
+	turn, err := h.startTurn(s.ID, func() (int, error) {
 		latest, err := db.LatestTurn(h.database, s.ID)
 		return latest + 1, err
-	})
+	}, h.newTurn(s.ID, req.Text, mode))
 	h.respondStarted(w, turn, err)
+}
+
+// newTurn plays a new turn from the player's input.
+func (h *Handler) newTurn(sessionID int64, text, mode string) turnFunc {
+	return func(ctx context.Context, turn int, ev game.Events) (*game.TurnResult, error) {
+		input := game.PlayerInput{SessionID: sessionID, Turn: turn, Text: text, Mode: mode}
+		return h.engine.ProcessTurn(ctx, input, ev)
+	}
 }
 
 func validMode(m string) (string, bool) {
@@ -385,8 +594,10 @@ func validMode(m string) (string, bool) {
 
 func (h *Handler) respondStarted(w http.ResponseWriter, turn int, err error) {
 	switch {
-	case errors.Is(err, errBusy):
+	case errors.Is(err, errBusy), errors.Is(err, game.ErrPartyChanged):
 		writeError(w, http.StatusConflict, err.Error())
+	case errors.Is(err, game.ErrNoStoppedTurn):
+		writeError(w, http.StatusNotFound, err.Error())
 	case err != nil:
 		writeError(w, http.StatusInternalServerError, err.Error())
 	default:
@@ -423,6 +634,10 @@ func (h *Handler) handleRedo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "やり直すターンを指定してください")
 		return
 	}
+	// The stopped turn itself too: discard it, then send the new input.
+	if h.refuseIfStopped(w, s.ID) {
+		return
+	}
 	prev, err := h.turnResult(s.ID, req.Turn)
 	if err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("ターン %d が見つかりません", req.Turn))
@@ -432,12 +647,12 @@ func (h *Handler) handleRedo(w http.ResponseWriter, r *http.Request) {
 	if req.Text != nil && strings.TrimSpace(*req.Text) != "" {
 		text = *req.Text
 	}
-	turn, err := h.startTurn(s.ID, text, prev.Mode, func() (int, error) {
+	turn, err := h.startTurn(s.ID, func() (int, error) {
 		if err := db.RestoreBeforeTurn(h.database, s.ID, req.Turn); err != nil {
 			return 0, fmt.Errorf("ターン %d の開始時点に戻せませんでした（チェックポイントは最新 10 件だけ残ります）: %w", req.Turn, err)
 		}
 		return req.Turn, nil
-	})
+	}, h.newTurn(s.ID, text, prev.Mode))
 	h.respondStarted(w, turn, err)
 }
 
@@ -474,6 +689,9 @@ func (h *Handler) handleRestore(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errBusy.Error())
 		return
 	}
+	if h.refuseIfStopped(w, s.ID) {
+		return
+	}
 	if err := db.RestoreBeforeTurn(h.database, s.ID, req.Turn); err != nil {
 		writeError(w, http.StatusNotFound, fmt.Sprintf("ターン %d の開始時点のチェックポイントがありません（最新 10 件だけ残ります）", req.Turn))
 		return
@@ -492,6 +710,9 @@ func (h *Handler) handleSessionQuest(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.QuestID == 0 {
 		writeError(w, http.StatusBadRequest, "受注するクエストを指定してください")
+		return
+	}
+	if h.refuseIfStopped(w, s.ID) {
 		return
 	}
 	if _, err := db.GetQuest(h.database, req.QuestID); err != nil {

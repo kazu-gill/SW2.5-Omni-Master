@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -100,6 +101,8 @@ func (h *Handler) Routes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /api/sessions/{id}", h.handleDeleteSession)
 	mux.HandleFunc("POST /api/sessions/{id}/turn", h.handleSessionTurn)
 	mux.HandleFunc("POST /api/sessions/{id}/cancel", h.handleCancelTurn)
+	mux.HandleFunc("POST /api/sessions/{id}/resume", h.handleResume)
+	mux.HandleFunc("POST /api/sessions/{id}/discard", h.handleDiscard)
 	mux.HandleFunc("POST /api/sessions/{id}/redo", h.handleRedo)
 	mux.HandleFunc("POST /api/sessions/{id}/restore", h.handleRestore)
 	mux.HandleFunc("POST /api/sessions/{id}/quest", h.handleSessionQuest)
@@ -209,6 +212,9 @@ func (h *Handler) handleNPCPosition(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, errBusy.Error())
 		return
 	}
+	if h.refuseIfStopped(w, req.SessionID) {
+		return
+	}
 
 	sheets, err := db.GetNPCSheets(h.database, req.SessionID)
 	if err != nil {
@@ -284,6 +290,9 @@ func (h *Handler) handleAddNPCSheet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
+	if h.refuseIfStopped(w, req.SessionID) {
+		return
+	}
 
 	// Find the YAML file whose id field matches
 	entries, _ := os.ReadDir(h.personasDir)
@@ -349,6 +358,9 @@ func (h *Handler) handleDeleteNPCSheet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
+	if h.refuseIfStopped(w, req.SessionID) {
+		return
+	}
 	if err := db.DeleteNPCSheet(h.database, req.SessionID, req.Name); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -371,6 +383,18 @@ func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
+		return
+	}
+	sessionID, err := db.NPCSheetSessionID(h.database, id)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		writeError(w, http.StatusNotFound, "NPC シートが見つかりません。画面を再読み込みしてください。")
+		return
+	case err != nil:
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if h.refuseIfStopped(w, sessionID) {
 		return
 	}
 	if req.YAMLBlob != nil {
@@ -409,6 +433,9 @@ func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
+	if h.refuseIfAnyStopped(w) {
+		return
+	}
 	if err := db.AcceptQuest(h.database, id); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -420,6 +447,9 @@ func (h *Handler) handleCompleteQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
+		return
+	}
+	if h.refuseIfAnyStopped(w) {
 		return
 	}
 	if err := db.CompleteQuest(h.database, id); err != nil {
@@ -477,6 +507,9 @@ func (h *Handler) handleUpdatePC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
+	if h.refuseIfAnyStopped(w) {
+		return
+	}
 	var req struct {
 		Name     string `json:"name"`
 		JSONBlob string `json:"json_blob"`
@@ -498,6 +531,9 @@ func (h *Handler) handleDeletePC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
+	if h.refuseIfAnyStopped(w) {
+		return
+	}
 	if err := db.DeletePlayerCharacter(h.database, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -511,6 +547,9 @@ func (h *Handler) handleActivatePC(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
+	if h.refuseIfAnyStopped(w) {
+		return
+	}
 	if err := db.ActivatePlayerCharacter(h.database, id); err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -522,6 +561,9 @@ func (h *Handler) handleDeactivatePC(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
+		return
+	}
+	if h.refuseIfAnyStopped(w) {
 		return
 	}
 	if err := db.DeactivatePlayerCharacter(h.database, id); err != nil {

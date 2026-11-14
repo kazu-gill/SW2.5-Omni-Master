@@ -35,7 +35,9 @@ WS  image  (数ターンごと、後から)
 | GET | `/api/sessions/{id}` | | `SessionState` |
 | DELETE | `/api/sessions/{id}` | | 204 |
 | POST | `/api/sessions/{id}/turn` | `{"text", "mode": "action" \| "gm"}` | 202 `{"turn"}` / 409 実行中 |
-| POST | `/api/sessions/{id}/cancel` | | 204 (実行中のターンを中断。ターンは無かったことになる) |
+| POST | `/api/sessions/{id}/cancel` | | 204 (実行中のターンを中断。終わった段までは残り、止まったターンになる) |
+| POST | `/api/sessions/{id}/resume` | | 202 `{"turn"}`。止まったターンを止まった段から続ける / 404 止まったターンが無い / 409 実行中・パーティが変わった |
+| POST | `/api/sessions/{id}/discard` | | 204。止まったターンを取り消し、そのターンの開始前に戻す / 404 止まったターンが無い / 409 実行中 |
 | POST | `/api/sessions/{id}/redo` | `{"turn", "text"?}` | 202 `{"turn"}`。そのターン以降を消し、開始前の状態に戻してから (text があれば差し替えて) やり直す |
 | POST | `/api/sessions/{id}/restore` | `{"turn"}` | 204。そのターンの開始前の状態に戻す (以降のターンは消える) |
 | POST | `/api/sessions/{id}/quest` | `{"quest_id"}` | 204。受注 (セッションのクエストにする) |
@@ -43,10 +45,31 @@ WS  image  (数ターンごと、後から)
 `mode: "gm"` は GM 直訴。GM だけが答え、NPC と数値は動かない。
 
 補足:
-- **中断** (`/cancel`) の後は WS に `error` (「ターンを中断しました…」) と `busy: false` が届く。状態はターンの開始前に戻っている
+- **止まったターン**: 段 (GM・各 NPC・Support) が終わるたびに途中結果が DB に残る。その後の失敗・中断・時間切れでは開始前に戻さず、
+  WS の `error` に `resumable: true` が付き、`SessionState.stopped_turn` に出る。「続きから」(`/resume`) か「取り消す」(`/discard`) を選ぶ。
+  オーケストレーターを再起動しても残る (起動時に実行中だったターンは止まったターンになる)。
+  途中結果ができる前の失敗 (チェックポイントの保存など) は今までどおり開始前に戻り、`resumable` は付かない
+- **中断** (`/cancel`) の後は WS に `error` (「ターンを中断しました。途中まで残っています…」, `resumable: true`) と `busy: false` が届く
+- **再開** (`/resume`) は新しいターンと同じく WS で進む (busy・時間切れも同じ)。止まった後に NPC の顔ぶれが変わっていると 409 (取り消すしかない)
 - **busy** はターン確定後の要約 (`stage: summary`) が終わるまで true のまま。要約中も次の送信は 409
 - **やり直し** (`/redo`) は元のターンのモード (行動 / 直訴) のまま。モードは変えられない
 - **巻き戻し** (`/restore {turn}`) の `turn` は「そのターンの開始前」。チェックポイントは最新 10 件だけ残る
+
+### 止まったターンがある間に断る操作 (409)
+
+本文は `{"error": "止まったターンがあります。「続きから」か「取り消す」を先に選んでください"}`。
+
+| 操作 | 断る条件 |
+|---|---|
+| `POST /api/sessions/{id}/turn` | そのセッションに止まったターンがある |
+| `POST /api/sessions/{id}/redo` | 同上 (止まったターン自身を直すときは、取り消してから新しい入力で送る) |
+| `POST /api/sessions/{id}/restore` | 同上 |
+| `POST /api/sessions/{id}/quest` | 同上 |
+| `PATCH /api/npc-position` | `session_id` のセッションに止まったターンがある |
+| `POST` / `DELETE /api/npc-sheet` | 同上 |
+| `PATCH /api/npc-sheet/{id}` | そのシートのセッションに止まったターンがある (シートが無ければ 404) |
+| `PATCH /api/quests/{id}/accept`、`.../complete` | どこかのセッションに止まったターンがある (クエストはセッションに属さない) |
+| `PUT` / `DELETE /api/player-characters/{id}`、`PATCH .../activate`、`.../deactivate` | 同上 (PC の作成は断らない) |
 
 ### パーティ・PC・クエスト・ルール (既存を継続)
 | メソッド | パス | 備考 |
@@ -75,7 +98,7 @@ WS  image  (数ターンごと、後から)
 | `rules` | `turn`, `stage`, `rules: [RuleHit]` | その段に渡したルール |
 | `check` | `turn`, `check: Check` | 判定の結果 |
 | `turn` | `result: TurnResult` | ターン確定 |
-| `error` | `turn`, `message` | ターンが失敗した (状態は開始前に戻っている) |
+| `error` | `turn`, `message`, `resumable`? | ターンが失敗した。`resumable: true` なら途中まで残っていて `/resume` で続けられる (無ければ状態は開始前に戻っている) |
 | `image` | `turn`, `url` | シーン画像ができた |
 | `busy` | `busy: bool` | ターンの実行状態 (他のタブ向け) |
 
@@ -87,7 +110,11 @@ SessionSummary { ...Session, quest_title: string, last_line: string }
 SessionState   { session: Session, quest: Quest|null,      // quest は GET /api/quests の要素と同じ形
                  pc: { id, name, is_active, sheet, json_blob }|null,  // 全体で 1 人の「使用中」PC。sheet は json_blob を解析したもの
                  npc_sheets: NPCSheet[], turns: TurnResult[], checkpoints: {turn, created_at}[],
-                 summary: string[], busy: boolean }
+                 summary: string[], busy: boolean,
+                 stopped_turn: StoppedTurn|null }
+StoppedTurn    { turn, input, mode: "action"|"gm", error: string,   // error は止まった原因
+                 done: string[],          // 終わった段: "gm" / "npc:<名前>" / "support"
+                 result: TurnResult }     // 終わった段までの結果 (GM の語り・行動した NPC・判定)
 NPCSheet       { id, session_id, name, hp, mp, hp_max, mp_max, lane: "enemy"|"front"|"party", yaml_blob }
 TurnResult     { session_id, turn, mode: "action"|"gm", input, gm_narration,
                  npc_actions: NPCAction[], deltas: ResourceDelta[], formation_changes: FormationChange[],

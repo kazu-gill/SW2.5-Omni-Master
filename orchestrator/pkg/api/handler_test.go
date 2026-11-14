@@ -22,7 +22,22 @@ func mockLLMSrv(gm, npc, support string) *httptest.Server {
 	return llmtest.NewServer(llmtest.ByStage(gm, npc, support))
 }
 
+// mockStageLLM is the fake LLM of setupHandler: a GM line, ガルド waiting,
+// and no HP/MP change.
+func mockStageLLM() *httptest.Server {
+	npcYAML := "name: ガルド\naction: 待機\ndialogue: 様子を見る\nmp_cost: 0\nhp_delta: 0"
+	return mockLLMSrv("GMが状況を描写します。", npcYAML, `[{"npc_name":"ガルド","hp_delta":0,"mp_cost":0}]`)
+}
+
 func setupHandler(t *testing.T) (*Handler, *httptest.Server, int64) {
+	t.Helper()
+	llmSrv := mockStageLLM()
+	t.Cleanup(llmSrv.Close)
+	return setupHandlerLLM(t, llmSrv.URL)
+}
+
+// setupHandlerLLM is setupHandler with the LLM at llmURL.
+func setupHandlerLLM(t *testing.T, llmURL string) (*Handler, *httptest.Server, int64) {
 	t.Helper()
 
 	database, err := db.Open(":memory:")
@@ -31,12 +46,8 @@ func setupHandler(t *testing.T) (*Handler, *httptest.Server, int64) {
 	}
 	t.Cleanup(func() { database.Close() })
 
-	npcYAML := "name: ガルド\naction: 待機\ndialogue: 様子を見る\nmp_cost: 0\nhp_delta: 0"
-	llmSrv := mockLLMSrv("GMが状況を描写します。", npcYAML, `[{"npc_name":"ガルド","hp_delta":0,"mp_cost":0}]`)
-	t.Cleanup(llmSrv.Close)
-
-	chat := llm.New(llmSrv.URL, "test-model", 5*time.Second)
-	ragEngine := rag.New(database, llm.New(llmSrv.URL, "test-embed", 5*time.Second))
+	chat := llm.New(llmURL, "test-model", 5*time.Second)
+	ragEngine := rag.New(database, llm.New(llmURL, "test-embed", 5*time.Second))
 	engine := game.NewEngine(database, chat, ragEngine, 2)
 
 	session, _ := db.CreateSession(database, "test")

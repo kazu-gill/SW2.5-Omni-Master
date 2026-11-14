@@ -143,6 +143,14 @@ func GetNPCSheets(d *sql.DB, sessionID int64) ([]NPCSheet, error) {
 	return out, rows.Err()
 }
 
+// NPCSheetSessionID returns the session of the NPC sheet with the given id
+// (sql.ErrNoRows if there is none).
+func NPCSheetSessionID(d *sql.DB, id int64) (int64, error) {
+	var sessionID int64
+	err := d.QueryRow(`SELECT session_id FROM npc_sheets WHERE id = ?`, id).Scan(&sessionID)
+	return sessionID, err
+}
+
 func DeleteNPCSheet(d *sql.DB, sessionID int64, name string) error {
 	_, err := d.Exec(`DELETE FROM npc_sheets WHERE session_id = ? AND name = ?`, sessionID, name)
 	return err

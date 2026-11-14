@@ -44,6 +44,13 @@ func main() {
 	}
 	defer database.Close()
 
+	// A turn left running died with the previous process: it can be resumed.
+	if n, err := db.StopRunningTurns(database); err != nil {
+		log.Printf("warn: stop running turns: %v", err)
+	} else if n > 0 {
+		log.Printf("%d turn(s) left running were marked stopped (resume or discard them)", n)
+	}
+
 	if err := db.SeedQuests(database); err != nil {
 		log.Printf("warn: seed quests: %v", err)
 	}
