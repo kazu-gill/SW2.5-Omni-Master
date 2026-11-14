@@ -94,9 +94,11 @@ interface Props {
   live: LiveTurn
   onRetry: () => void
   onEditBack: () => void
+  /** 止まったターンの情報をまだ読めていないとき、読み直す */
+  onReload: () => void
 }
 
-export default function LiveTurnView({ live, onRetry, onEditBack }: Props) {
+export default function LiveTurnView({ live, onRetry, onEditBack, onReload }: Props) {
   const now = useNow(!live.error)
   const checks = live.checks
   const rules = Object.values(live.rules).flat()
@@ -110,6 +112,13 @@ export default function LiveTurnView({ live, onRetry, onEditBack }: Props) {
         <div className="live-extra">
           <div className="chips">{checks.map((c, i) => <CheckChip key={i} c={c} />)}</div>
           <RuleChips rules={uniqueRules} />
+        </div>
+      )}
+      {live.error && live.resumable && (
+        <div className="fail-box" role="alert">
+          <div className="err">ターンが途中で止まりました: {live.error}</div>
+          <div className="ui-muted">途中まで残っています。止まったターンの情報を読み込むと「続きから」「取り消す」が出ます。</div>
+          <div className="ui-row"><button onClick={onReload}>読み直す</button></div>
         </div>
       )}
       {live.error && !live.resumable && (

@@ -46,6 +46,7 @@ export type LiveAction =
   | { kind: 'resume'; stopped: StoppedTurn; stages: { key: string; label: string }[] }
   | { kind: 'accepted'; turn: number }
   | { kind: 'fail'; message: string }
+  | { kind: 'halt'; message: string }
   | { kind: 'clear' }
   | { kind: 'busy'; busy: boolean }
   | { kind: 'deltas'; items: DeltaItem[] }
@@ -90,6 +91,11 @@ function resumedLive(st: StoppedTurn, stages: { key: string; label: string }[]):
   return live
 }
 
+function haltLive(live: LiveTurn, message: string, resumable: boolean): LiveTurn {
+  const stages = live.stages.map((s) => (s.status === 'start' || s.status === 'retry' ? { ...s, status: 'failed' as const, endedAt: Date.now() } : s))
+  return { ...live, stages, error: live.error ?? message, resumable }
+}
+
 function defaultLabel(key: string) {
   if (key === 'gm') return 'GM'
   if (key === 'support') return '数値確認'
@@ -126,6 +132,8 @@ export function liveReducer(state: LiveState, a: LiveAction): LiveState {
       return state.live ? { ...state, live: { ...state.live, turn: a.turn } } : state
     case 'fail':
       return state.live ? { ...state, live: { ...state.live, error: a.message } } : state
+    case 'halt': // 「止める」が通った。WS の error を待たずに、途中まで残る止まり方にする
+      return state.live ? { ...state, live: haltLive(state.live, a.message, true) } : state
     case 'clear':
       return { ...state, live: null }
     case 'busy':
@@ -157,8 +165,7 @@ function onWs(state: LiveState, m: Exclude<WsMessage, { type: 'delta' }>): LiveS
     case 'error': {
       const live = liveFor(state, m.turn)
       if (!live) return state
-      const stages = live.stages.map((s) => (s.status === 'start' || s.status === 'retry' ? { ...s, status: 'failed' as const, endedAt: Date.now() } : s))
-      return { ...state, live: { ...live, stages, error: m.message, resumable: !!m.resumable } }
+      return { ...state, live: haltLive({ ...live, error: undefined }, m.message, !!m.resumable) }
     }
     case 'check': {
       const live = liveFor(state, m.turn)

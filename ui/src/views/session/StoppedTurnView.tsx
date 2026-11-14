@@ -74,7 +74,7 @@ export default function StoppedTurnView({ stopped, working, onResume, onDiscard,
       <div className="fail-box" role="alert">
         <div className="err">ターン {stopped.turn} が途中で止まりました{stopped.error ? `: ${stopped.error}` : ''}</div>
         <div className="ui-muted">
-          {done.length > 0 ? '終わった段の結果は残っています。続きから再開するか、取り消してこのターンの前に戻してください。' : '取り消してこのターンの前に戻すか、続きから最初からやり直してください。'}
+          {done.length > 0 ? '終わった段の結果は残っています。続きから再開するか、取り消してこのターンの前に戻してください。' : '続きから (最初の段から) やり直せます。取り消してこのターンの前に戻すこともできます。'}
         </div>
         <div className="ui-row">
           <button className="primary" disabled={working} onClick={onResume} title="止まった段から続ける">▶ 続きから</button>

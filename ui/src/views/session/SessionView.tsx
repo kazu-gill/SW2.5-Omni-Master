@@ -47,12 +47,14 @@ export default function SessionView({ game, onLeave }: Props) {
   // 続きの操作の最中 (cur が進行中) や、他のタブで進行中のときは出さない
   const stopped = !running && !live.busy ? state.stopped_turn ?? null : null
   const busy = running || live.busy
-  const locked = busy || !!stopped
+  // 止まったと分かったが stopped_turn がまだ state に無いあいだも送らせない
+  const awaitingStopped = !!cur?.resumable && !stopped
+  const locked = busy || !!stopped || awaitingStopped
   const npcNames = state.npc_sheets.map((s) => s.name)
   const blockedReason = live.summarizing
     ? '📝 要約を更新しています。終わると送れます'
     : live.busy ? '別のタブでターンが進行中です。終わると送れます'
-      : stopped ? '止まったターンがあります。「続きから」か「取り消す」を先に選んでください'
+      : stopped || awaitingStopped ? '止まったターンがあります。「続きから」か「取り消す」を先に選んでください'
       : socket !== 'open' ? '進行を受け取る接続をつないでいます… (送れますが、進み具合は再接続後にまとめて出ます)' : ''
 
   const begin = (input: string, m: TurnMode) => {
@@ -86,6 +88,7 @@ export default function SessionView({ game, onLeave }: Props) {
     try {
       // 止めたターンは途中まで残る。WS の error (resumable) と state の stopped_turn で「続きから」の画面になる
       await post(`/api/sessions/${sid}/cancel`)
+      dispatch({ kind: 'halt', message: 'ターンを止めました。途中まで残っています' })
       setErr('')
     } catch (e) {
       setErr(`止められませんでした: ${errorText(e)}`)
@@ -231,6 +234,7 @@ export default function SessionView({ game, onLeave }: Props) {
             {cur && !stopped && (
               <LiveTurnView
                 live={cur}
+                onReload={() => void reload()}
                 onRetry={() => void start(cur.input, cur.mode)}
                 onEditBack={() => { setText(cur.input); setMode(cur.mode); dispatch({ kind: 'clear' }) }}
               />
