@@ -69,11 +69,11 @@ func MarkTurnStopped(d *sql.DB, sessionID int64, errMsg string) error {
 }
 
 // StopRunningTurns flips every running row to stopped (startup: the previous
-// process died mid-turn) and returns how many rows changed.
+// process died mid-turn), records why, and returns how many rows changed.
 func StopRunningTurns(d *sql.DB) (int64, error) {
 	res, err := d.Exec(
-		`UPDATE turn_progress SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE status = ?`,
-		ProgressStopped, ProgressRunning,
+		`UPDATE turn_progress SET status = ?, error = ?, updated_at = CURRENT_TIMESTAMP WHERE status = ?`,
+		ProgressStopped, "オーケストレーターの再起動で止まりました", ProgressRunning,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("StopRunningTurns: %w", err)
@@ -81,14 +81,45 @@ func StopRunningTurns(d *sql.DB) (int64, error) {
 	return res.RowsAffected()
 }
 
-// AnyStoppedTurn reports whether any session has a stopped turn.
-func AnyStoppedTurn(d *sql.DB) (bool, error) {
-	var n int
-	err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM turn_progress WHERE status = ?)`, ProgressStopped).Scan(&n)
-	if err != nil {
-		return false, fmt.Errorf("AnyStoppedTurn: %w", err)
+// StoppedSession names a session that holds a stopped turn.
+type StoppedSession struct {
+	ID    int64
+	Title string
+}
+
+// FirstStoppedSession returns the lowest-id session with a stopped turn, or
+// nil when none has one.
+func FirstStoppedSession(d *sql.DB) (*StoppedSession, error) {
+	var s StoppedSession
+	err := d.QueryRow(
+		`SELECT s.id, s.title FROM turn_progress p JOIN sessions s ON s.id = p.session_id
+		 WHERE p.status = ? ORDER BY s.id LIMIT 1`, ProgressStopped,
+	).Scan(&s.ID, &s.Title)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
 	}
-	return n == 1, nil
+	if err != nil {
+		return nil, fmt.Errorf("FirstStoppedSession: %w", err)
+	}
+	return &s, nil
+}
+
+// StoppedSessionIDs is the set of sessions that hold a stopped turn.
+func StoppedSessionIDs(d *sql.DB) (map[int64]bool, error) {
+	rows, err := d.Query(`SELECT session_id FROM turn_progress WHERE status = ?`, ProgressStopped)
+	if err != nil {
+		return nil, fmt.Errorf("StoppedSessionIDs: %w", err)
+	}
+	defer rows.Close()
+	out := map[int64]bool{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("StoppedSessionIDs: %w", err)
+		}
+		out[id] = true
+	}
+	return out, rows.Err()
 }
 
 func DeleteTurnProgress(d *sql.DB, sessionID int64) error {

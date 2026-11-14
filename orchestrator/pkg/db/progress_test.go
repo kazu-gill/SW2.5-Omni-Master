@@ -59,9 +59,6 @@ func TestStopRunningTurns(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if any, _ := AnyStoppedTurn(d); !any {
-		t.Error("AnyStoppedTurn before = false, want true")
-	}
 	n, err := StopRunningTurns(d)
 	if err != nil || n != 2 {
 		t.Fatalf("StopRunningTurns = %d, %v; want 2", n, err)
@@ -69,21 +66,31 @@ func TestStopRunningTurns(t *testing.T) {
 	if c := countRows(t, d, `SELECT COUNT(*) FROM turn_progress WHERE status = 'stopped'`); c != 3 {
 		t.Errorf("stopped = %d, want 3", c)
 	}
+	if c := countRows(t, d, `SELECT COUNT(*) FROM turn_progress WHERE error = 'オーケストレーターの再起動で止まりました'`); c != 2 {
+		t.Errorf("rows with the restart reason = %d, want 2", c)
+	}
 }
 
-func TestAnyStoppedTurn(t *testing.T) {
+func TestFirstStoppedSession(t *testing.T) {
 	d := openTestDB(t)
-	s, _ := CreateSessionTitled(d, "t", "")
-	if any, err := AnyStoppedTurn(d); err != nil || any {
-		t.Errorf("empty: %v %v", any, err)
+	s, _ := CreateSessionTitled(d, "森の調査", "")
+	if st, err := FirstStoppedSession(d); err != nil || st != nil {
+		t.Errorf("empty: %v %v", st, err)
 	}
 	_ = SaveTurnProgress(d, TurnProgress{SessionID: s.ID, Turn: 1, Status: ProgressRunning})
-	if any, _ := AnyStoppedTurn(d); any {
-		t.Error("running only should be false")
+	if st, _ := FirstStoppedSession(d); st != nil {
+		t.Error("running only should be nil")
+	}
+	if ids, _ := StoppedSessionIDs(d); len(ids) != 0 {
+		t.Errorf("running only: ids = %v", ids)
 	}
 	_ = MarkTurnStopped(d, s.ID, "x")
-	if any, _ := AnyStoppedTurn(d); !any {
-		t.Error("stopped should be true")
+	st, err := FirstStoppedSession(d)
+	if err != nil || st == nil || st.ID != s.ID || st.Title != "森の調査" {
+		t.Errorf("stopped: %v %v", st, err)
+	}
+	if ids, _ := StoppedSessionIDs(d); !ids[s.ID] || len(ids) != 1 {
+		t.Errorf("ids = %v", ids)
 	}
 }
 

@@ -231,16 +231,17 @@ func (h *Handler) refuseIfStopped(w http.ResponseWriter, sessionID int64) bool {
 	return false
 }
 
-// refuseIfAnyStopped is refuseIfStopped for what belongs to no session (PCs,
-// quests): a stopped turn in any session refuses it.
+// refuseIfAnyStopped is refuseIfStopped for what belongs to no session (PCs):
+// a stopped turn in any session refuses it, and the message names that session.
 func (h *Handler) refuseIfAnyStopped(w http.ResponseWriter) bool {
-	stopped, err := db.AnyStoppedTurn(h.database)
+	st, err := db.FirstStoppedSession(h.database)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return true
 	}
-	if stopped {
-		writeError(w, http.StatusConflict, errStopped.Error())
+	if st != nil {
+		writeError(w, http.StatusConflict, fmt.Sprintf(
+			"セッション「%s」(#%d) に止まったターンがあります。そのセッションで「続きから」か「取り消す」を先に選んでください", st.Title, st.ID))
 		return true
 	}
 	return false
@@ -415,13 +416,19 @@ func (h *Handler) handleListSessions(w http.ResponseWriter, r *http.Request) {
 	}
 	type summary struct {
 		sessionJSON
-		QuestTitle string `json:"quest_title"`
-		LastLine   string `json:"last_line"`
+		QuestTitle  string `json:"quest_title"`
+		LastLine    string `json:"last_line"`
+		StoppedTurn bool   `json:"stopped_turn"`
+	}
+	stopped, err := db.StoppedSessionIDs(h.database)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	out := make([]summary, 0, len(sessions))
 	for _, s := range sessions {
 		sj := h.sessionJSON(s)
-		item := summary{sessionJSON: sj}
+		item := summary{sessionJSON: sj, StoppedTurn: stopped[s.ID]}
 		if sj.QuestID != nil {
 			if q, err := db.GetQuest(h.database, *sj.QuestID); err == nil {
 				item.QuestTitle = q.Title

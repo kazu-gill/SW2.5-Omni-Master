@@ -30,6 +30,7 @@ export interface Session {
 export interface SessionSummary extends Session {
   quest_title: string
   last_line: string
+  stopped_turn: boolean
 }
 
 export interface Checkpoint {

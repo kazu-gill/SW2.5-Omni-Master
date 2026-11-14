@@ -476,8 +476,6 @@ func TestEditsRefusedWhileStopped(t *testing.T) {
 		{"npc-sheet add", http.MethodPost, "/api/npc-sheet", map[string]any{"session_id": sid, "persona_id": "gard"}},
 		{"npc-sheet delete", http.MethodDelete, "/api/npc-sheet", map[string]any{"session_id": sid, "name": "ガルド"}},
 		{"npc-sheet update", http.MethodPatch, fmt.Sprintf("/api/npc-sheet/%d", sheets[0].ID), map[string]any{"hp": 1, "mp": 1}},
-		{"quest accept", http.MethodPatch, fmt.Sprintf("/api/quests/%d/accept", quests[0].ID), nil},
-		{"quest complete", http.MethodPatch, fmt.Sprintf("/api/quests/%d/complete", quests[0].ID), nil},
 		{"pc update", http.MethodPut, fmt.Sprintf("/api/player-characters/%d", pc.ID), map[string]any{"name": "PC2", "json_blob": "{}"}},
 		{"pc delete", http.MethodDelete, fmt.Sprintf("/api/player-characters/%d", pc.ID), nil},
 		{"pc activate", http.MethodPatch, fmt.Sprintf("/api/player-characters/%d/activate", pc.ID), nil},
@@ -500,12 +498,70 @@ func TestEditsRefusedWhileStopped(t *testing.T) {
 	if resp := doJSON(t, http.MethodPost, srv.URL+"/api/npc-sheet", map[string]any{"session_id": other.ID, "persona_id": "gard"}); resp.StatusCode != http.StatusNoContent {
 		t.Errorf("other session's npc-sheet add: status = %d", resp.StatusCode)
 	}
+	// Global quest edits do not touch a stopped turn's prefix: they go through.
+	if resp := doJSON(t, http.MethodPatch, fmt.Sprintf("%s/api/quests/%d/accept", srv.URL, quests[1].ID), nil); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("quest accept: status = %d, want 204", resp.StatusCode)
+	}
+	if resp := doJSON(t, http.MethodPatch, fmt.Sprintf("%s/api/quests/%d/complete", srv.URL, quests[1].ID), nil); resp.StatusCode != http.StatusNoContent {
+		t.Errorf("quest complete: status = %d, want 204", resp.StatusCode)
+	}
 	// Creating a PC changes nothing in play.
 	if resp := doJSON(t, http.MethodPost, srv.URL+"/api/player-characters", map[string]any{"name": "新"}); resp.StatusCode != http.StatusCreated {
 		t.Errorf("pc create: status = %d", resp.StatusCode)
 	}
 	if st := getState(t, srv, sid); stoppedTurn(t, st) == nil || len(st["npc_sheets"].([]any)) != 1 {
 		t.Errorf("state changed while stopped: %v", st)
+	}
+}
+
+func TestPCRefusalNamesStoppedSession(t *testing.T) {
+	m := newStageLLM(t)
+	h, srv, sid := setupHandlerLLM(t, m.srv.URL)
+	pc, _ := db.CreatePlayerCharacter(h.database, "PC", "{}")
+	if _, err := h.database.Exec(`UPDATE sessions SET title = '森の調査' WHERE id = ?`, sid); err != nil {
+		t.Fatal(err)
+	}
+	read := dialSession(t, srv, sid)
+	read("busy")
+	stopAtNPC(t, m, srv, sid, read)
+
+	sess, _ := db.GetSession(h.database, sid)
+	want := fmt.Sprintf("セッション「%s」(#%d) に止まったターンがあります。そのセッションで「続きから」か「取り消す」を先に選んでください", sess.Title, sid)
+	req, _ := http.NewRequest(http.MethodPatch, fmt.Sprintf("%s/api/player-characters/%d/activate", srv.URL, pc.ID), nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var e map[string]string
+	json.NewDecoder(resp.Body).Decode(&e)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict || e["error"] != want {
+		t.Errorf("status = %d, error = %q, want 409 %q", resp.StatusCode, e["error"], want)
+	}
+
+	var list []map[string]any
+	r, err := http.Get(srv.URL + "/api/sessions")
+	if err != nil {
+		t.Fatal(err)
+	}
+	json.NewDecoder(r.Body).Decode(&list)
+	r.Body.Close()
+	if len(list) != 1 || list[0]["stopped_turn"] != true {
+		t.Errorf("session list stopped_turn = %v", list)
+	}
+}
+
+func TestSheetUpdateRefusedWhileRunning(t *testing.T) {
+	h, srv, sid := setupHandlerLLM(t, newStageLLM(t).srv.URL)
+	sheets, _ := db.GetNPCSheets(h.database, sid)
+	release, err := h.turns.hold(sid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	resp := doJSON(t, http.MethodPatch, fmt.Sprintf("%s/api/npc-sheet/%d", srv.URL, sheets[0].ID), map[string]any{"hp": 1, "mp": 1})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("status = %d, want 409", resp.StatusCode)
 	}
 }
 

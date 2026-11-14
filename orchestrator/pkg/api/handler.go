@@ -402,6 +402,10 @@ func (h *Handler) handleUpdateNPCSheet(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	if h.turns.busy(sessionID) {
+		writeError(w, http.StatusConflict, errBusy.Error())
+		return
+	}
 	if h.refuseIfStopped(w, sessionID) {
 		return
 	}
@@ -441,9 +445,6 @@ func (h *Handler) handleAcceptQuest(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
 		return
 	}
-	if h.refuseIfAnyStopped(w) {
-		return
-	}
 	if err := db.AcceptQuest(h.database, id); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -455,9 +456,6 @@ func (h *Handler) handleCompleteQuest(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "ID が正しくありません")
-		return
-	}
-	if h.refuseIfAnyStopped(w) {
 		return
 	}
 	if err := db.CompleteQuest(h.database, id); err != nil {

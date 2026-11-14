@@ -68,8 +68,10 @@ WS  image  (数ターンごと、後から)
 | `PATCH /api/npc-position` | `session_id` のセッションに止まったターンがある |
 | `POST` / `DELETE /api/npc-sheet` | 同上 |
 | `PATCH /api/npc-sheet/{id}` | そのシートのセッションに止まったターンがある (シートが無ければ 404) |
-| `PATCH /api/quests/{id}/accept`、`.../complete` | どこかのセッションに止まったターンがある (クエストはセッションに属さない) |
-| `PUT` / `DELETE /api/player-characters/{id}`、`PATCH .../activate`、`.../deactivate` | 同上 (PC の作成は断らない) |
+| `PUT` / `DELETE /api/player-characters/{id}`、`PATCH .../activate`、`.../deactivate` | どこかのセッションに止まったターンがある (PC の作成は断らない)。本文は止まったセッションを名指しする: `セッション「<title>」(#<id>) に止まったターンがあります。そのセッションで「続きから」か「取り消す」を先に選んでください` |
+
+グローバルなクエストの受注・完了 (`PATCH /api/quests/{id}/accept`、`.../complete`) は断らない。止まったターンが読むクエストはセッション側 (`sessions.quest_id`) だけなので影響しない。
+`PATCH /api/npc-sheet/{id}` は、ターンが実行中のセッションでも 409 (ターン確定時に全シートを開始時の写しから書き直すため)。
 
 ### パーティ・PC・クエスト・ルール (既存を継続)
 | メソッド | パス | 備考 |
@@ -106,7 +108,8 @@ WS  image  (数ターンごと、後から)
 
 ```ts
 Session        { id, title, quest_id: number|null, turn: number, created_at, updated_at }
-SessionSummary { ...Session, quest_title: string, last_line: string }
+SessionSummary { ...Session, quest_title: string, last_line: string,
+                 stopped_turn: boolean }   // そのセッションに止まったターンがある
 SessionState   { session: Session, quest: Quest|null,      // quest は GET /api/quests の要素と同じ形
                  pc: { id, name, is_active, sheet, json_blob }|null,  // 全体で 1 人の「使用中」PC。sheet は json_blob を解析したもの
                  npc_sheets: NPCSheet[], turns: TurnResult[], checkpoints: {turn, created_at}[],

@@ -133,7 +133,7 @@ export function liveReducer(state: LiveState, a: LiveAction): LiveState {
     case 'fail':
       return state.live ? { ...state, live: { ...state.live, error: a.message } } : state
     case 'halt': // 「止める」が通った。WS の error を待たずに、途中まで残る止まり方にする
-      return state.live ? { ...state, live: haltLive(state.live, a.message, true) } : state
+      return state.live ? { ...state, live: haltLive(state.live, a.message, state.live.error ? !!state.live.resumable : true) } : state
     case 'clear':
       return { ...state, live: null }
     case 'busy':

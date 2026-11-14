@@ -72,7 +72,7 @@ export default function StartView({ quests, onOpen }: Props) {
           {list.map((s) => (
             <div key={s.id} className="card session-card" role="button" tabIndex={0}
               onClick={() => onOpen(s.id)} onKeyDown={(e) => { if (e.key === 'Enter') onOpen(s.id) }}>
-              <b>{s.title || `セッション ${s.id}`}</b>
+              <b>{s.title || `セッション ${s.id}`}{s.stopped_turn && <span className="stopped-mark" title="止まったターンがあります"> ⏸ 止まっています</span>}</b>
               <small>{s.quest_title ? `📜 ${s.quest_title}` : 'クエスト未受注'} ・ ターン {s.turn}</small>
               {s.last_line && <small className="last">{s.last_line}</small>}
               <small>{formatTime(s.updated_at)}</small>
