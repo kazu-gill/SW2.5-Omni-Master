@@ -52,7 +52,7 @@ export default function Composer({ text, setText, mode, setMode, running, blocke
           }}
         />
         {running ? (
-          <button className="danger" onClick={onStop} title="このターンを中断する (ターンは無かったことになる)">⏹ 止める</button>
+          <button className="danger" onClick={onStop} title="このターンを止める (続きから再開できる)">⏹ 止める</button>
         ) : (
           <button className="primary" disabled={disabled || !text.trim()} onClick={onSend}>送る</button>
         )}

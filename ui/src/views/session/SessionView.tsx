@@ -9,6 +9,7 @@ import ChatLog from './ChatLog'
 import Composer from './Composer'
 import LiveTurnView from './LiveTurnView'
 import SidePanel from './SidePanel'
+import StoppedTurnView from './StoppedTurnView'
 import TurnView from './TurnView'
 
 interface Props {
@@ -24,6 +25,7 @@ export default function SessionView({ game, onLeave }: Props) {
   const [err, setErr] = useState('')
   const [jump, setJump] = useState(0)
   const [sideOpen, setSideOpen] = useState(false)
+  const [working, setWorking] = useState(false)
 
   if (!state) {
     return (
@@ -41,11 +43,16 @@ export default function SessionView({ game, onLeave }: Props) {
   const sid = state.session.id
   const cur = live.live
   const running = !!cur && !cur.error
+  // 止まったターンがあるあいだは、新しいターン・やり直し・巻き戻し・パーティの編集が 409 になる。
+  // 続きの操作の最中 (cur が進行中) や、他のタブで進行中のときは出さない
+  const stopped = !running && !live.busy ? state.stopped_turn ?? null : null
   const busy = running || live.busy
+  const locked = busy || !!stopped
   const npcNames = state.npc_sheets.map((s) => s.name)
   const blockedReason = live.summarizing
     ? '📝 要約を更新しています。終わると送れます'
     : live.busy ? '別のタブでターンが進行中です。終わると送れます'
+      : stopped ? '止まったターンがあります。「続きから」か「取り消す」を先に選んでください'
       : socket !== 'open' ? '進行を受け取る接続をつないでいます… (送れますが、進み具合は再接続後にまとめて出ます)' : ''
 
   const begin = (input: string, m: TurnMode) => {
@@ -77,19 +84,76 @@ export default function SessionView({ game, onLeave }: Props) {
   const stop = async () => {
     if (!cur) return
     try {
+      // 止めたターンは途中まで残る。WS の error (resumable) と state の stopped_turn で「続きから」の画面になる
       await post(`/api/sessions/${sid}/cancel`)
-      dispatch({ kind: 'clear' })
-      setText(cur.input)
-      setMode(cur.mode)
-      setErr('止めました。このターンは無かったことになっています。入力を直して送り直せます。')
+      setErr('')
     } catch (e) {
       setErr(`止められませんでした: ${errorText(e)}`)
     }
     void reload()
   }
 
+  const resume = async () => {
+    const st = stopped
+    if (!st || working) return
+    setWorking(true)
+    setErr('')
+    dispatch({ kind: 'resume', stopped: st, stages: plannedStages(st.mode, npcNames) })
+    patchState((s) => ({ ...s, stopped_turn: null }))
+    setJump((j) => j + 1)
+    try {
+      const r = await post<{ turn: number }>(`/api/sessions/${sid}/resume`)
+      dispatch({ kind: 'accepted', turn: r.turn })
+    } catch (e) {
+      dispatch({ kind: 'clear' })
+      setErr(`続けられませんでした: ${errorText(e)}`)
+      await reload() // まだ止まったターンとして残っている (パーティが変わっていたら取り消すしかない)
+    } finally {
+      setWorking(false)
+    }
+  }
+
+  /** 止まったターンを取り消す (開始前に戻る)。失敗は投げる。どちらでも state は読み直す */
+  const discardNow = async () => {
+    try {
+      await post(`/api/sessions/${sid}/discard`)
+      dispatch({ kind: 'clear' })
+      patchState((s) => ({ ...s, stopped_turn: null }))
+    } finally {
+      await reload()
+    }
+  }
+
+  const askDiscard = () => {
+    const st = stopped
+    if (!st) return
+    void ui.confirm({
+      title: `ターン ${st.turn} を取り消しますか？`,
+      message: `止まったターンの途中結果が消え、ターン ${st.turn} を始める前の状態に戻ります。`,
+      ok: '取り消す',
+      danger: true,
+      run: () => { setErr(''); return discardNow() },
+    })
+  }
+
+  const fix = async (input: string) => {
+    const st = stopped
+    if (!st || working) return
+    setWorking(true)
+    setErr('')
+    try {
+      await discardNow()
+    } catch (e) {
+      setErr(`取り消せませんでした: ${errorText(e)}`)
+      setWorking(false)
+      return
+    }
+    setWorking(false)
+    await start(input, st.mode)
+  }
+
   const redo = async (t: TurnResult, newText?: string) => {
-    if (busy) return
+    if (locked) return
     begin(newText ?? t.input, t.mode)
     patchState((s) => ({ ...s, turns: s.turns.filter((x) => x.turn < t.turn) }))
     try {
@@ -153,15 +217,18 @@ export default function SessionView({ game, onLeave }: Props) {
               <TurnView
                 key={t.turn}
                 t={t}
-                isLast={t.turn === lastTurn && !cur}
-                disabled={busy}
+                isLast={t.turn === lastTurn && !cur && !stopped}
+                disabled={locked}
                 imageUrl={live.images[t.turn]}
                 drawing={live.drawing.includes(t.turn)}
                 onRedo={(x, v) => void redo(x, v)}
                 onRestore={(x) => restore(x.turn)}
               />
             ))}
-            {cur && (
+            {stopped && (
+              <StoppedTurnView stopped={stopped} working={working} onResume={() => void resume()} onDiscard={askDiscard} onFix={(v) => void fix(v)} />
+            )}
+            {cur && !stopped && (
               <LiveTurnView
                 live={cur}
                 onRetry={() => void start(cur.input, cur.mode)}
@@ -176,7 +243,7 @@ export default function SessionView({ game, onLeave }: Props) {
             mode={mode}
             setMode={setMode}
             running={running}
-            blocked={busy}
+            blocked={locked}
             blockedReason={blockedReason}
             onSend={send}
             onStop={() => void stop()}
@@ -186,7 +253,7 @@ export default function SessionView({ game, onLeave }: Props) {
         <div className={sideOpen ? 'side-wrap open' : 'side-wrap'}>
           <SidePanel
             state={state}
-            disabled={busy}
+            disabled={locked}
             summarizing={live.summarizing}
             onMove={move}
             onRestore={restore}

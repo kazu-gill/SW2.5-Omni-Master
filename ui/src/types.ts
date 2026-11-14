@@ -37,6 +37,19 @@ export interface Checkpoint {
   created_at: string
 }
 
+/** 途中で止まったターン (失敗・中断・時間切れ・再起動)。「続きから」か「取り消す」を選ぶまで次へ進めない */
+export interface StoppedTurn {
+  turn: number
+  input: string
+  mode: TurnMode
+  /** 止まった原因 */
+  error: string
+  /** 終わった段: gm / npc:<名前> / support */
+  done: string[]
+  /** 終わった段までの結果 */
+  result: TurnResult
+}
+
 export interface SessionState {
   session: Session
   quest: QuestEntry | null
@@ -46,6 +59,7 @@ export interface SessionState {
   checkpoints: Checkpoint[]
   summary: string[]
   busy: boolean
+  stopped_turn?: StoppedTurn | null
 }
 
 export interface NPCSheet {
@@ -131,7 +145,7 @@ export type WsMessage =
   | { type: 'rules'; session_id: number; turn: number; stage: string; rules: RuleHit[] }
   | { type: 'check'; session_id: number; turn: number; check: Check }
   | { type: 'turn'; session_id: number; result: TurnResult }
-  | { type: 'error'; session_id: number; turn: number; message: string }
+  | { type: 'error'; session_id: number; turn: number; message: string; resumable?: boolean }
   | { type: 'image'; session_id: number; turn: number; url: string }
   | { type: 'busy'; session_id: number; busy: boolean }
 

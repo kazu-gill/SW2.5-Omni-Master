@@ -112,7 +112,7 @@ export default function LiveTurnView({ live, onRetry, onEditBack }: Props) {
           <RuleChips rules={uniqueRules} />
         </div>
       )}
-      {live.error && (
+      {live.error && !live.resumable && (
         <div className="fail-box">
           <div className="err">ターンが失敗しました: {live.error}</div>
           <div className="ui-muted">状態はこのターンの前に戻っています。もう一度送るか、入力を直してください。</div>

@@ -1,6 +1,6 @@
 // 進行中のターン (WebSocket で届く段・本文・判定) を画面の状態にまとめる。
 // ?mock=1 の作り物のターンも同じ reducer を通る。
-import type { Check, RuleHit, StageStatus, TurnMode, WsMessage } from '../types'
+import type { Check, RuleHit, StageStatus, StoppedTurn, TurnMode, WsMessage } from '../types'
 
 export interface LiveStage {
   key: string // gm / npc:<名前> / support
@@ -24,6 +24,8 @@ export interface LiveTurn {
   startedAt: number
   /** ターンが失敗した (状態は開始前に戻っている) */
   error?: string
+  /** 失敗したが途中まで残っている (stopped_turn で「続きから」か「取り消す」を選ぶ) */
+  resumable?: boolean
 }
 
 export interface LiveState {
@@ -41,6 +43,7 @@ export type DeltaItem = { turn: number; stage: string; text: string }
 
 export type LiveAction =
   | { kind: 'begin'; input: string; mode: TurnMode; stages: { key: string; label: string }[] }
+  | { kind: 'resume'; stopped: StoppedTurn; stages: { key: string; label: string }[] }
   | { kind: 'accepted'; turn: number }
   | { kind: 'fail'; message: string }
   | { kind: 'clear' }
@@ -66,6 +69,25 @@ function newLive(input: string, mode: TurnMode, stages: { key: string; label: st
     turn: null, input, mode, rules: {}, checks: [], startedAt: Date.now(),
     stages: stages.map((s) => ({ ...s, status: 'pending', attempt: 0, text: '' })),
   }
+}
+
+/** 止まったターンを続けるときの画面: 終わった段は結果を出したまま、残りを待つ */
+function resumedLive(st: StoppedTurn, stages: { key: string; label: string }[]): LiveTurn {
+  const r = st.result
+  const live = newLive(st.input, st.mode, stages)
+  live.turn = st.turn
+  live.checks = r.checks ?? []
+  live.stages = live.stages.map((s) => {
+    if (!st.done.includes(s.key)) return s
+    let text = ''
+    if (s.key === 'gm') text = r.gm_narration
+    else if (s.key.startsWith('npc:')) {
+      const a = (r.npc_actions ?? []).find((x) => x.name === s.key.slice(4))
+      if (a) text = `dialogue: ${a.dialogue}\naction: ${a.action}`
+    }
+    return { ...s, status: 'done' as const, attempt: 1, text }
+  })
+  return live
 }
 
 function defaultLabel(key: string) {
@@ -98,6 +120,8 @@ export function liveReducer(state: LiveState, a: LiveAction): LiveState {
       return initialLive
     case 'begin':
       return { ...state, live: newLive(a.input, a.mode, a.stages) }
+    case 'resume':
+      return { ...state, live: resumedLive(a.stopped, a.stages) }
     case 'accepted':
       return state.live ? { ...state, live: { ...state.live, turn: a.turn } } : state
     case 'fail':
@@ -134,7 +158,7 @@ function onWs(state: LiveState, m: Exclude<WsMessage, { type: 'delta' }>): LiveS
       const live = liveFor(state, m.turn)
       if (!live) return state
       const stages = live.stages.map((s) => (s.status === 'start' || s.status === 'retry' ? { ...s, status: 'failed' as const, endedAt: Date.now() } : s))
-      return { ...state, live: { ...live, stages, error: m.message } }
+      return { ...state, live: { ...live, stages, error: m.message, resumable: !!m.resumable } }
     }
     case 'check': {
       const live = liveFor(state, m.turn)
