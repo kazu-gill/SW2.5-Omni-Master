@@ -13,12 +13,13 @@ import (
 // stages into one prefill of the turn context plus small increments.
 type transcript struct {
 	msgs []llm.Message
+	base int // len of the session context the turn started from
 }
 
 // newTranscript starts a turn after the session context (system message and
 // recent turns), which every stage of the turn shares as its prefix.
 func newTranscript(base []llm.Message) *transcript {
-	return &transcript{msgs: slices.Clone(base)}
+	return &transcript{msgs: slices.Clone(base), base: len(base)}
 }
 
 // ask returns the messages for a stage: the transcript plus instruction. The
@@ -35,4 +36,17 @@ func (t *transcript) record(instruction, answer string) {
 		llm.Message{Role: "user", Content: instruction},
 		llm.Message{Role: "assistant", Content: answer},
 	)
+}
+
+// added returns what the turn recorded after the session context: the
+// instruction / answer pairs, in order. The context itself is rebuilt on
+// resume (loadContext), so only this part is saved.
+func (t *transcript) added() []llm.Message {
+	return slices.Clone(t.msgs[t.base:])
+}
+
+// replay re-records messages saved by added, restoring a stopped turn's
+// transcript on top of a freshly built session context.
+func (t *transcript) replay(added []llm.Message) {
+	t.msgs = append(t.msgs, added...)
 }

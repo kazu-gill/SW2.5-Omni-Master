@@ -16,10 +16,14 @@ import (
 	"github.com/kf/sw25-omni-master/pkg/rag"
 )
 
-// scriptedLLM returns replies in order and records every request.
+// scriptedLLM returns replies in order and records every request. A call
+// whose 1-based number is in failAt returns a transport error instead and
+// does not use up a reply.
 type scriptedLLM struct {
 	replies []llm.Result
 	calls   []scriptedCall
+	failAt  map[int]bool
+	next    int
 }
 
 type scriptedCall struct {
@@ -29,10 +33,14 @@ type scriptedCall struct {
 
 func (s *scriptedLLM) Complete(_ context.Context, msgs []llm.Message, opts llm.CompletionOptions) (llm.Result, error) {
 	s.calls = append(s.calls, scriptedCall{msgs: append([]llm.Message(nil), msgs...), opts: opts})
-	if len(s.calls) > len(s.replies) {
+	if s.failAt[len(s.calls)] {
+		return llm.Result{}, errors.New("scriptedLLM: connection refused")
+	}
+	if s.next >= len(s.replies) {
 		return llm.Result{}, errors.New("scriptedLLM: no more replies")
 	}
-	return s.replies[len(s.calls)-1], nil
+	s.next++
+	return s.replies[s.next-1], nil
 }
 
 func newStageEngine(t *testing.T, model ChatModel, retryLimit int) *Engine {

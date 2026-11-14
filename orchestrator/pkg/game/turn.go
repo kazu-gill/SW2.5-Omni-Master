@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -41,9 +42,12 @@ func (e *Engine) SetDice(d6 func() int) { e.d6 = d6 }
 type turnRun struct {
 	e     *Engine
 	ev    Events
+	input PlayerInput
 	tr    *TurnResult
 	tx    *transcript
 	facts []string // 判定結果: told to every later stage of the turn
+	done  []string // finished stages (turnState.Done)
+	party []string // NPC names when the turn started (turnState.NPCs)
 }
 
 func (r *turnRun) stage() stageRun {
@@ -59,6 +63,10 @@ func (r *turnRun) stage() stageRun {
 //
 // A GM appeal (ModeGM) runs only step 2 and changes nothing. Each LLM stage
 // is validated and re-thought on failure (see runStage); progress goes to ev.
+//
+// After the checkpoint the turn is saved in turn_progress after every stage.
+// If it fails from then on, the row is marked stopped and ResumeTurn can
+// continue from the stage that stopped.
 func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) (*TurnResult, error) {
 	if ev == nil {
 		ev = NoEvents{}
@@ -80,7 +88,7 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 		return nil, fmt.Errorf("session context: %w", err)
 	}
 	run := &turnRun{
-		e: e, ev: ev, tx: newTranscript(sc.messages()),
+		e: e, ev: ev, input: input, tx: newTranscript(sc.messages()), party: npcNames(sheets),
 		tr: &TurnResult{
 			SessionID: input.SessionID, Turn: input.Turn, Mode: input.Mode, Input: input.Text,
 			StageAttempts: map[string]int{}, CreatedAt: time.Now(),
@@ -89,37 +97,110 @@ func (e *Engine) ProcessTurn(ctx context.Context, input PlayerInput, ev Events) 
 			Checks: []Check{}, RulesUsed: []RuleHit{}, Warnings: []string{},
 		},
 	}
-
-	gmNarration, err := run.gm(ctx, input, sheets)
-	if err != nil {
-		return nil, fmt.Errorf("gm narration: %w", err)
+	if err := run.saveProgress(); err != nil {
+		return nil, fmt.Errorf("turn progress: %w", err)
 	}
-	run.tr.GMNarration = gmNarration
-	if input.Mode == ModeGM {
-		if err := run.finish(nil); err != nil {
+	return run.play(ctx, sheets)
+}
+
+// ResumeTurn continues the session's stopped turn from the first stage that
+// did not finish. The stages that finished are not run again: their answers,
+// checks and logs stand as saved. The checkpoint and the player's log row
+// were made when the turn started.
+func (e *Engine) ResumeTurn(ctx context.Context, sessionID int64, ev Events) (*TurnResult, error) {
+	if ev == nil {
+		ev = NoEvents{}
+	}
+	p, err := db.GetTurnProgress(e.db, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if p == nil || p.Status != db.ProgressStopped {
+		return nil, ErrNoStoppedTurn
+	}
+	st, err := loadState(p.StateJSON)
+	if err != nil {
+		return nil, err
+	}
+	sheets, err := db.GetNPCSheets(e.db, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("get npc sheets: %w", err)
+	}
+	if !slices.Equal(npcNames(sheets), st.NPCs) {
+		return nil, ErrPartyChanged
+	}
+	// The stopped stage starts over: drop what it logged ([NG] attempts).
+	if err := db.DeleteTurnLogsAfter(e.db, sessionID, p.Turn, st.LogMark); err != nil {
+		return nil, err
+	}
+	sc, err := e.loadContext(sessionID, sheets)
+	if err != nil {
+		return nil, fmt.Errorf("session context: %w", err)
+	}
+	run := &turnRun{
+		e: e, ev: ev, input: PlayerInput{SessionID: sessionID, Turn: p.Turn, Text: p.Input, Mode: p.Mode},
+		tr: &st.Result, tx: newTranscript(sc.messages()), facts: st.Facts, done: st.Done, party: st.NPCs,
+	}
+	run.tx.replay(st.Transcript)
+	if err := run.saveProgress(); err != nil { // status running again
+		return nil, fmt.Errorf("turn progress: %w", err)
+	}
+	return run.play(ctx, sheets)
+}
+
+// play runs the stages of the turn that are not done yet and finishes it.
+// Fresh and resumed turns both come through here. Any error marks the turn
+// stopped so it can be resumed.
+func (r *turnRun) play(ctx context.Context, sheets []db.NPCSheet) (*TurnResult, error) {
+	res, err := r.stages(ctx, sheets)
+	if err != nil {
+		if serr := db.MarkTurnStopped(r.e.db, r.tr.SessionID, err.Error()); serr != nil {
+			return nil, errors.Join(err, serr)
+		}
+		return nil, err
+	}
+	return res, nil
+}
+
+func (r *turnRun) stages(ctx context.Context, sheets []db.NPCSheet) (*TurnResult, error) {
+	if !r.isDone(doneGM) {
+		gmNarration, err := r.gm(ctx, r.input, sheets)
+		if err != nil {
+			return nil, fmt.Errorf("gm narration: %w", err)
+		}
+		r.tr.GMNarration = gmNarration
+		if err := r.markDone(doneGM); err != nil {
+			return nil, fmt.Errorf("turn progress: %w", err)
+		}
+	}
+	if r.input.Mode == ModeGM {
+		if err := r.finish(nil); err != nil {
 			return nil, fmt.Errorf("finish turn: %w", err)
 		}
-		return run.tr, nil
+		return r.tr, nil
 	}
 
-	npcActions, err := run.npcs(ctx, sheets)
-	if err != nil {
+	if err := r.npcs(ctx, sheets); err != nil {
 		return nil, fmt.Errorf("npc actions: %w", err)
 	}
-	run.tr.NPCActions = append(run.tr.NPCActions, npcActions...)
 
-	deltas, err := run.support(ctx, npcActions, sheets)
-	if err != nil {
-		return nil, fmt.Errorf("resource calc: %w", err)
+	if !r.isDone(doneSupport) {
+		deltas, err := r.support(ctx, r.tr.NPCActions, sheets)
+		if err != nil {
+			return nil, fmt.Errorf("resource calc: %w", err)
+		}
+		r.tr.Deltas = append(r.tr.Deltas, deltas...)
+		if err := r.markDone(doneSupport); err != nil {
+			return nil, fmt.Errorf("turn progress: %w", err)
+		}
 	}
-	run.tr.Deltas = append(run.tr.Deltas, deltas...)
 
-	next, changes := nextSheets(deltas, npcActions, sheets)
-	run.tr.FormationChanges = append(run.tr.FormationChanges, changes...)
-	if err := run.finish(next); err != nil {
+	next, changes := nextSheets(r.tr.Deltas, r.tr.NPCActions, sheets)
+	r.tr.FormationChanges = append(r.tr.FormationChanges, changes...)
+	if err := r.finish(next); err != nil {
 		return nil, fmt.Errorf("finish turn: %w", err)
 	}
-	return run.tr, nil
+	return r.tr, nil
 }
 
 // Number of rulebook chunks given to each stage.
@@ -248,15 +329,19 @@ func (r *turnRun) gm(ctx context.Context, input PlayerInput, sheets []db.NPCShee
 	return narration, nil
 }
 
-// npcs asks each NPC for its action, one after another. An NPC whose output
-// never validates sits out this turn (recorded in tr.Warnings); a transport
-// error aborts the turn.
+// npcs asks each NPC that has not acted yet for its action, one after
+// another, adding it to tr.NPCActions and saving the turn after each NPC. An
+// NPC whose output never validates sits out this turn (recorded in
+// tr.Warnings, and done all the same); a transport error aborts the turn.
 //
 // Each NPC sees the GM narration, the checks rolled so far and the NPCs that
 // already acted this turn through the shared transcript.
-func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, error) {
-	var actions []NPCAction
+func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) error {
 	for _, sheet := range sheets {
+		key := npcKey(sheet.Name)
+		if r.isDone(key) {
+			continue
+		}
 		instruction := r.factsBlock() + fmt.Sprintf(
 			"【指示: NPC「%s」】\n"+
 				"あなたはNPC「%s」です。人物設定の口調・価値観・行動原則に従ってください。現在HP=%d / MP=%d。現在のレーン: %s。\n"+
@@ -272,7 +357,6 @@ func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, 
 			sheet.MP, -sheet.HP,
 			sheet.Name,
 		)
-		key := "npc:" + sheet.Name
 		var action *NPCAction
 		res, attempts, err := r.e.runStage(ctx, r.stage(), stage{
 			name: "npc", key: key, label: sheet.Name, stream: true,
@@ -292,10 +376,13 @@ func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, 
 		if errors.Is(err, errRejected) {
 			r.tr.Warnings = append(r.tr.Warnings, fmt.Sprintf("NPC %s は行動できませんでした: %v", sheet.Name, err))
 			r.ev.Stage(StageEvent{Turn: r.tr.Turn, Stage: key, Label: sheet.Name, Status: StageSkipped, Attempt: attempts})
+			if err := r.markDone(key); err != nil {
+				return fmt.Errorf("turn progress: %w", err)
+			}
 			continue
 		}
 		if err != nil {
-			return actions, fmt.Errorf("NPC %s: %w", sheet.Name, err)
+			return fmt.Errorf("NPC %s: %w", sheet.Name, err)
 		}
 		r.tx.record(instruction, res.Text)
 		// A check the code cannot read is not worth re-running the NPC for:
@@ -307,9 +394,12 @@ func (r *turnRun) npcs(ctx context.Context, sheets []db.NPCSheet) ([]NPCAction, 
 				r.tr.Warnings = append(r.tr.Warnings, fmt.Sprintf("%s の判定を振れませんでした: %v", sheet.Name, err))
 			}
 		}
-		actions = append(actions, *action)
+		r.tr.NPCActions = append(r.tr.NPCActions, *action)
+		if err := r.markDone(key); err != nil {
+			return fmt.Errorf("turn progress: %w", err)
+		}
 	}
-	return actions, nil
+	return nil
 }
 
 var speakerLabelRe = regexp.MustCompile(`^\s*(?:【GM】|GM\s*[:：])\s*`)
