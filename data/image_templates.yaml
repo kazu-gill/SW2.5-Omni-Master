@@ -1,0 +1,45 @@
+defaults:
+  prefix: "fantasy TRPG illustration, "
+  suffix: ", high detail, painterly style, concept art"
+  negative: "text, watermark, blurry, low quality, modern, photograph, 3d render, cartoon"
+  steps: 20
+  cfg: 7.0
+  sampler: "euler"
+  scheduler: "normal"
+
+scenes:
+  combat:
+    prefix: "epic fantasy battle scene, dynamic action pose, dramatic lighting, "
+    suffix: ", cinematic, detailed armor and weapons, intense atmosphere"
+    negative: "peaceful, calm, static, text, watermark, blurry"
+    steps: 25
+    cfg: 7.5
+    sampler: "dpm_2m"
+    scheduler: "karras"
+
+  exploration:
+    prefix: "fantasy dungeon exploration, atmospheric, mysterious environment, "
+    suffix: ", detailed stonework, torchlight, shadows, depth of field"
+    negative: "bright sunlight, town, crowd, text, watermark, blurry"
+    steps: 20
+    cfg: 7.0
+    sampler: "euler"
+    scheduler: "normal"
+
+  town:
+    prefix: "fantasy medieval town scene, warm lighting, lively atmosphere, "
+    suffix: ", detailed architecture, vibrant colors, daytime, people"
+    negative: "dark, dungeon, monster, combat, gore, text, watermark"
+    steps: 20
+    cfg: 6.5
+    sampler: "euler"
+    scheduler: "normal"
+
+  event:
+    prefix: "dramatic fantasy moment, character interaction, storytelling scene, "
+    suffix: ", expressive characters, narrative composition, illustration style"
+    negative: "text, watermark, blurry, low quality"
+    steps: 22
+    cfg: 7.0
+    sampler: "euler"
+    scheduler: "normal"
