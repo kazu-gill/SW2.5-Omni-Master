@@ -18,6 +18,8 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 6. [embed_chunks.py — 埋め込みベクトル生成](#6-embed_chunkspy)
 7. [optimize_chunks.py — チャンク最適化（任意・旧方式）](#7-optimize_chunkspy)
 8. [generate_scenarios.py — シナリオバッチ生成](#8-generate_scenariospy)
+9. [fix_rulebook_ocr.py — ルールブック原本の OCR 誤字修正](#9-fix_rulebook_ocrpy)
+10. [find_ocr_suspects.py — OCR 誤字の候補探し](#10-find_ocr_suspectspy)
 
 ---
 
@@ -34,7 +36,7 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 | オプション | 説明 |
 |-----------|------|
 | （なし） | 通常リセット。ルールブックデータを保持したままゲームデータをクリア |
-| `--full` | rag_chunks（ルールブック）も含む全テーブルを削除 |
+| `--full` | 通常リセットに加えて `rag_chunks`（ルールブック・ハウスルール・訂正）も削除 |
 | `-h`, `--help` | ヘルプを表示 |
 
 ### 動作の詳細
@@ -42,7 +44,7 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 **通常リセット（引数なし）**
 
 削除されるもの:
-- `sessions`（すべてのセッション。カスケードで `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries` も削除）
+- `sessions`（すべてのセッション。カスケードで `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`, `turn_progress` も削除）
 - `quests`
 
 保持されるもの:
@@ -54,7 +56,7 @@ LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-ser
 
 **フルリセット（--full）**
 
-全テーブルを削除。ルールブックを再インポートする必要があります。初期構築後の初めてのセットアップや、データを完全に作り直すときに使用します。
+通常リセットに加えて `rag_chunks` の全行（ルールブック・ハウスルール・訂正。カスケードで `rag_chunks_opt` も）を削除します。`player_characters` と `scenarios` / `scenario_images` は残ります。ルールブックを再インポートする必要があります。ルールデータを作り直すときに使用します。
 
 ### スキーマ適用
 
@@ -67,6 +69,14 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 ```
 
 `rag_chunks` の `source` / `section` / `page_from` / `page_to` 列は、オーケストレーターの起動時（`db.Open`）と `build_rulebook.py` / `embed_chunks.py` の実行時に自動で追加されます。
+
+### git フック
+
+リポジトリ（`.git`）があれば、`hooks/pre-commit` を `.git/hooks/pre-commit` にシンボリックリンクします。このフックはコミットのたびに、ステージした内容を gitleaks（設定は `.gitleaks.toml`）と trufflehog で調べ、秘密情報や個人のパスが見つかればコミットを止めます。どちらも未インストールならその検査を飛ばします。検出があり、LM Studio（`http://localhost:1234`）が動いていれば、検出内容のリスク評価も表示します。緊急時は `git commit --no-verify` で飛ばせます。
+
+### 終了時の案内
+
+最後にリセット後の件数を表示します。`data/rulebook/swordworld2.5_rulebook1.md` があれば、続けて実行するコマンド（`fix_rulebook_ocr.py --apply` → `build_rulebook.py --apply` → `embed_chunks.py`）も表示します。
 
 ### 設定ファイル
 
@@ -83,6 +93,7 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 
 # フルリセット後のルールブックインポート例
 ./setup.sh --full
+uv run ai-agents/fix_rulebook_ocr.py --apply     # 適用済みなら何もしない
 uv run ai-agents/build_rulebook.py --apply
 uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
@@ -160,7 +171,7 @@ LLM の推論ログは mlx-serve 側にあります。
 
 起動したプロセスの PID は `.pids` ファイルに記録されます。`Stop-Omni.ps1` はこのファイルと実際のポートリスナーの両方を使って確実に停止します。
 
-### 旧スクリプト
+両スクリプトの共通処理（`config.env` の読み込み、`/health` の確認、ポートを LISTEN しているプロセスの特定）は `scripts/OmniMaster.Common.psm1` にあります。
 
 ---
 
@@ -278,6 +289,7 @@ uv run ai-agents/ocr_rulebook.py <ファイルパス> [オプション]
 |-----------|-----------|------|
 | `<ファイルパス>` | （必須） | インポートするファイル（.pdf / .md / .txt） |
 | `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule`（通常は `correction` か `houserule` を指定） |
+| `--tag` | （空） | 取り込む行に付けるタグ（`combat` / `magic` / `general` など、任意） |
 | `--db` | `data/omni.db` | DB ファイルパス |
 
 ### ソースタイプと優先度
@@ -654,6 +666,54 @@ uv run ai-agents/generate_scenarios.py \
 
 ---
 
+## 9. fix_rulebook_ocr.py
+
+ルールブック原本の Markdown（`data/rulebook/`）に残った OCR 誤字を、スクリプト内の置換表で直します。原本は著作物のため git 管理外で履歴が残らないので、修正を置換表として持ち、原本を取り直したときも同じ修正をかけ直せるようにしています。原本を取り直したら、[build_rulebook.py](#4-build_rulebookpy) の前に実行します。
+
+### 概要
+
+```
+uv run ai-agents/fix_rulebook_ocr.py [--md PATH] [--apply]
+```
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | ルールブック Markdown（原本） |
+| `--apply` | — | 原本をバックアップしてから書き換える。省略時は何が直るかを表示するだけ |
+
+### 動作の詳細
+
+- 各置換は誤字が現れる文脈に限定し、原本での件数を固定している。件数が合わない置換が 1 つでもあれば、何も書き込まずに止まる（原本が変わった可能性があるため）
+- すでに直っている置換（0 件）は「適用済み」として飛ばすので、何度実行してもよい
+- 誤字の根拠と判断の記録は [ocr-suspects-20260927.md](ocr-suspects-20260927.md)
+
+---
+
+## 10. find_ocr_suspects.py
+
+ルールブック Markdown から OCR 誤字の候補を洗い出して表示します。ファイルも DB も変更しません。候補には同音異義語などの正しい表記も混ざるので、人が見て判断し、直すものを `fix_rulebook_ocr.py` の置換表に足します。
+
+### 概要
+
+```
+uv run ai-agents/find_ocr_suspects.py [--md PATH]
+```
+
+| オプション | デフォルト | 説明 |
+|-----------|-----------|------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | ルールブック Markdown |
+
+### 検出するもの
+
+| 種類 | 内容 |
+|------|------|
+| ルビ | 同じ読みに付いた漢字が、多数派と少数派に割れているもの（例: よろい → 鎧 / 籠） |
+| 項目名 | 「知名度／弱点値:」のような「ラベル:」のうち、多数派と 1 文字違いの少数派 |
+| 長音 | カタカナ語の長音がマイナス記号・ハイフンになっているもの |
+| 用語 | 《》〈〉【】[] で囲まれた用語のうち、多数派と 1 文字違いの少数派（Ⅰ / I / 1 の揺れや中黒の有無も出る） |
+
+---
+
 ## 依存関係の確認
 
 ```bash
@@ -661,8 +721,8 @@ uv run ai-agents/generate_scenarios.py \
 cd ai-agents
 uv pip list
 
-# uv がインストールされていない場合
-pip install uv
+# uv がインストールされていない場合は、公式の手順で入れる
+#   https://docs.astral.sh/uv/getting-started/installation/
 
 # 全依存関係をインストール
 uv sync

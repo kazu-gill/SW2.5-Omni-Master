@@ -18,6 +18,8 @@ The LLMs (chat and embeddings) are served by mlx-serve (`~/AI/MLX`), a separate 
 6. [embed_chunks.py — Embedding Vector Generation](#6-embed_chunkspy)
 7. [optimize_chunks.py — Chunk Optimization (Optional, Legacy)](#7-optimize_chunkspy)
 8. [generate_scenarios.py — Scenario Batch Generation](#8-generate_scenariospy)
+9. [fix_rulebook_ocr.py — OCR Typo Fixes for the Rulebook Source](#9-fix_rulebook_ocrpy)
+10. [find_ocr_suspects.py — Finding Suspected OCR Typos](#10-find_ocr_suspectspy)
 
 ---
 
@@ -34,7 +36,7 @@ Used for first-time setup and between-session data resets.
 | Option | Description |
 |--------|-------------|
 | (none) | Standard reset — clears game data while preserving rulebook data |
-| `--full` | Full wipe, including `rag_chunks` (rulebook) |
+| `--full` | The standard reset plus `rag_chunks` (rulebook, house rules, corrections) |
 | `-h`, `--help` | Show help |
 
 ### Behavior
@@ -42,7 +44,7 @@ Used for first-time setup and between-session data resets.
 **Standard reset (no arguments)**
 
 Cleared:
-- `sessions` (every session; cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`)
+- `sessions` (every session; cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`, `turn_progress`)
 - `quests`
 
 Preserved:
@@ -54,7 +56,7 @@ Preserved:
 
 **Full reset (--full)**
 
-Drops all tables including `rag_chunks`. Rulebook data must be re-imported. Use this for a clean first-time install or to rebuild from scratch.
+On top of the standard reset, deletes every row of `rag_chunks` (rulebook, house rules and corrections; `rag_chunks_opt` goes with it by cascade). `player_characters` and `scenarios` / `scenario_images` are kept. Rulebook data must be re-imported. Use this to rebuild the rule data.
 
 ### Schema Application
 
@@ -68,6 +70,14 @@ ALTER TABLE rag_chunks ADD COLUMN overrides_id INTEGER REFERENCES rag_chunks(id)
 
 The `source` / `section` / `page_from` / `page_to` columns of `rag_chunks` are added automatically when the orchestrator starts (`db.Open`) and when `build_rulebook.py` / `embed_chunks.py` run.
 
+### Git Hook
+
+If the directory is a git repository (`.git` exists), `hooks/pre-commit` is symlinked to `.git/hooks/pre-commit`. On every commit the hook scans the staged content with gitleaks (configured by `.gitleaks.toml`) and trufflehog, and blocks the commit when it finds secrets or personal paths. A scanner that is not installed is skipped. When something is found and LM Studio (`http://localhost:1234`) is running, a risk assessment of the findings is printed as well. In an emergency, skip it with `git commit --no-verify`.
+
+### Closing Messages
+
+The script ends by printing the row counts after the reset. If `data/rulebook/swordworld2.5_rulebook1.md` exists, it also prints the commands to run next (`fix_rulebook_ocr.py --apply` → `build_rulebook.py --apply` → `embed_chunks.py`).
+
 ### Configuration
 
 Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
@@ -78,11 +88,12 @@ Reads `DB_PATH` from `config.env`. Defaults to `data/omni.db` if not set.
 # Reset that deletes every session and the quests
 ./setup.sh
 
-# Full wipe and rebuild
+# Reset including the rule data
 ./setup.sh --full
 
 # After a full reset, re-import the rulebook
 ./setup.sh --full
+uv run ai-agents/fix_rulebook_ocr.py --apply     # does nothing if already applied
 uv run ai-agents/build_rulebook.py --apply
 uv run ai-agents/embed_chunks.py --db data/omni.db --embed-url http://127.0.0.1:11455
 ```
@@ -160,7 +171,7 @@ LLM inference logs live on the mlx-serve side.
 
 Process PIDs are written to `.pids`. `Stop-Omni.ps1` uses both this file and live port lookups to ensure all processes are stopped.
 
-### Legacy Scripts
+The code both scripts share (reading `config.env`, the `/health` check, finding the processes listening on a port) is in `scripts/OmniMaster.Common.psm1`.
 
 ---
 
@@ -278,6 +289,7 @@ uv run ai-agents/ocr_rulebook.py <file> [options]
 |--------|---------|-------------|
 | `<file>` | (required) | File to import (.pdf / .md / .txt) |
 | `--source-type` | `rulebook` | `rulebook` / `correction` / `houserule` (normally pass `correction` or `houserule`) |
+| `--tag` | (empty) | Tag for the imported rows (`combat` / `magic` / `general` etc., optional) |
 | `--db` | `data/omni.db` | Database file path |
 
 ### Source Types and Priority
@@ -651,6 +663,54 @@ uv run ai-agents/generate_scenarios.py \
 
 ---
 
+## 9. fix_rulebook_ocr.py
+
+Fixes OCR typos left in the rulebook source Markdown (`data/rulebook/`) from a replacement table inside the script. The source is copyrighted and kept out of git, so it has no history; keeping the fixes as a table lets the same fixes be applied again when the source is re-extracted. After re-extracting the source, run this before [build_rulebook.py](#4-build_rulebookpy).
+
+### Synopsis
+
+```
+uv run ai-agents/fix_rulebook_ocr.py [--md PATH] [--apply]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | Rulebook Markdown (the source) |
+| `--apply` | — | Back up the source, then rewrite it. Without it, only shows what would change |
+
+### Behavior
+
+- Each replacement is limited to the context where the typo appears and has a fixed expected count in the source. If any count does not match, nothing is written (the source may have changed)
+- A replacement that is already applied (0 matches) is skipped, so the script can be run any number of times
+- The evidence and decisions for each typo are in [ocr-suspects-20260927.md](ocr-suspects-20260927.md)
+
+---
+
+## 10. find_ocr_suspects.py
+
+Lists suspected OCR typos in the rulebook Markdown. It changes neither the file nor the DB. The list also contains correct spellings (homophones and the like), so a person decides, and what should be fixed goes into the replacement table of `fix_rulebook_ocr.py`.
+
+### Synopsis
+
+```
+uv run ai-agents/find_ocr_suspects.py [--md PATH]
+```
+
+| Option | Default | Description |
+|--------|---------|-------------|
+| `--md` | `data/rulebook/swordworld2.5_rulebook1.md` | Rulebook Markdown |
+
+### What It Looks For
+
+| Kind | What |
+|------|------|
+| Ruby | Kanji attached to the same reading that split into a majority and a minority (e.g. よろい → 鎧 / 籠) |
+| Labels | "Label:" items such as 「知名度／弱点値:」 where a minority differs from the majority by one character |
+| Long vowels | Katakana words whose long-vowel mark became a minus sign or hyphen |
+| Terms | Terms in 《》〈〉【】[] where a minority differs from the majority by one character (Ⅰ / I / 1 variants and a missing middle dot show up here too) |
+
+---
+
 ## Dependency Management
 
 ```bash
@@ -658,8 +718,8 @@ uv run ai-agents/generate_scenarios.py \
 cd ai-agents
 uv pip list
 
-# Install uv if not available
-pip install uv
+# If uv is not installed, follow the official instructions
+#   https://docs.astral.sh/uv/getting-started/installation/
 
 # Install all declared dependencies
 uv sync

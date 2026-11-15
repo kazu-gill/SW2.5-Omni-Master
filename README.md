@@ -21,6 +21,7 @@
 | **判定はコードが振る** | GM / NPC は判定の種類・基準値・目標値だけを書き、2d6 はオーケストレーターが振る (12 は自動成功、2 は自動失敗) |
 | **ルールブック RAG** | ベクター検索に加え、特技・魔法などの用語を読みで引く (「庇う」「かばう」でも同じ用語に当たる)。ハウスルール・訂正を優先 |
 | **複数セッション** | セッションの作成・一覧・削除。中断、直前のターンの作り直し (入力の修正も可)、任意のターンの開始前への巻き戻し (NPC の HP/MP・配置も戻る。チェックポイントは最新 10 件) |
+| **止まったターンの再開** | 失敗・中断・時間切れで止まったターンは、終わった段 (GM の語り・NPC の行動・振ったサイコロ) を残す。止まった段から続けるか、取り消すかを選べる。オーケストレーターを再起動しても残る |
 | **リアルタイム UI** | WebSocket で段ごとの進行と GM / NPC の本文を逐次表示。ダイスとルールのチップ、3 レーンの配置、スマホ幅 (375px) とダークモードに対応 |
 | **シーン画像** | MLX の画像工房 (mlx-studio-web) で 1 ターン目と数ターンごとに挿絵を生成 (オプション) |
 | **バッチメンテナンス** | ルールブック Markdown のチャンク化・インポート、シナリオのオフライン事前生成 |
@@ -44,7 +45,7 @@ Go Orchestrator  :8080
         └─▶ mlx-studio-web :11462  画像工房 (オプション。構図は Gemma、描画は ComfyUI)
                 │
         SQLite (omni.db)
-          sessions / npc_sheets / turn_results / session_summaries / rag_chunks / checkpoints …
+          sessions / npc_sheets / turn_results / turn_progress / session_summaries / rag_chunks / checkpoints …
 ```
 
 **ターン処理フロー:**
@@ -52,16 +53,18 @@ Go Orchestrator  :8080
 すべての LLM 段は同じモデルを 1 段ずつ直列に呼びます。1 セッションで同時に走るターンは 1 つです。
 
 1. プレイヤーが UI から行動を入力 (`POST /api/sessions/{id}/turn`。すぐ 202 が返り、ターン番号はサーバーが決める)
-2. Orchestrator がチェックポイント (ターン開始前の NPC の状態) を保存
+2. Orchestrator がチェックポイント (ターン開始前の NPC の状態) を保存。以降、段が終わるたびに途中結果を DB に残す
 3. RAG でプレイヤー入力に関連するルールを検索 (上位 5 件)
 4. GM が固定の前置き・あらすじ・未要約のターン・ルールを受けてナラティブを生成。判定が要るときは「判定: 誰/判定名/基準値N/目標値M」の行を書き、コードが 2d6 を振る
 5. NPC 1 → NPC 2 → NPC 3 の順 (シート順) にアクションを生成。YAML の `check` で判定を求めればコードが振る
 6. Support が NPC の行動から引いたルール (上位 3 件) と判定結果を参照してリソース変更 (HP/MP) を確定
-7. DB (HP/MP・隊列・ログ・ターン結果) を更新
+7. ターンを確定 (HP/MP・隊列・ターン結果を 1 つのトランザクションで更新)
 8. 進行 (段の開始・本文の差分・ルール・判定・確定したターン) を WebSocket `/ws?session_id=` で配信
 9. 3 ターンたまるごとにあらすじを更新し、1 ターン目と `IMAGE_EVERY` ターンごとに画像工房でシーン画像を生成 (有効時)
 
-GM 直訴 (`mode: "gm"`) は GM だけが答え、NPC と数値は動きません。各段の出力は検証され、NG ならその段だけを「再思考」させます (却下した出力とエラー内容を渡し、thinking を有効化して呼び直す。最大 `STAGE_RETRY_LIMIT` 回)。それでも NG の場合、NPC はそのターンを見送り、Support は NPC 自身の HP/MP 値を使います (どちらも `warnings` に記録)。GM が NG のままならターンは失敗します。失敗・中断・`TURN_TIMEOUT_SEC` 超過のターンは、開始前の状態に戻ります。段ごとの呼び出し回数はターン結果の `stage_attempts` に入ります。
+GM 直訴 (`mode: "gm"`) は GM だけが答え、NPC と数値は動きません。各段の出力は検証され、NG ならその段だけを「再思考」させます (却下した出力とエラー内容を渡し、thinking を有効化して呼び直す。最大 `STAGE_RETRY_LIMIT` 回)。それでも NG の場合、NPC はそのターンを見送り、Support は NPC 自身の HP/MP 値を使います (どちらも `warnings` に記録)。GM が NG のままならターンは止まります。段ごとの呼び出し回数はターン結果の `stage_attempts` に入ります。
+
+失敗・中断・`TURN_TIMEOUT_SEC` 超過で止まったターンは、終わった段までを残した「止まったターン」になります。UI の「▶ 続きから」(`POST /api/sessions/{id}/resume`) で止まった段から再開するか、「取り消す」(`/discard`) で開始前の状態に戻します。再開しても終わった段は作り直さず、振ったサイコロも振り直しません。止まったターンがある間は、そのセッションの新しいターンやパーティの編集は 409 で断られます。
 
 API の取り決め (エンドポイント・WebSocket のイベント・型) は [docs/api.md](docs/api.md)、処理の詳細は [docs/spec_ja.md](docs/spec_ja.md) を参照してください。
 
@@ -141,7 +144,9 @@ IMAGES_DIR=/path/to/sw25-omni-master/data/images
 ./setup.sh
 ```
 
-> **フルリセット** (ルールデータを含めて全消去) する場合:
+> `setup.sh` は実行のたびにすべてのセッションとクエストを消します (クエストは次の起動時に初期データが入り直します)。あわせて `hooks/pre-commit` (gitleaks / trufflehog による秘密情報チェック) を `.git/hooks` に入れます。
+>
+> **フルリセット** (ルールブック・ハウスルール・訂正も消す。PC とシナリオは残る) する場合:
 > ```bash
 > ./setup.sh --full
 > ```
@@ -150,7 +155,10 @@ IMAGES_DIR=/path/to/sw25-omni-master/data/images
 ### 4. ルールブックのインポート (推奨)
 
 ```bash
-# ルールブック Markdown (data/rulebook/swordworld2.5_rulebook1.md) をチャンク化して確認する (DB は変更しない)
+# 原本 (data/rulebook/swordworld2.5_rulebook1.md) の OCR 誤字を直す (適用済みなら何もしない)
+uv run ai-agents/fix_rulebook_ocr.py --apply
+
+# ルールブック Markdown をチャンク化して確認する (DB は変更しない)
 uv run ai-agents/build_rulebook.py
 
 # 確認できたら DB のルールブック行を置き換える (実行前に data/backup/ へバックアップ)
@@ -216,7 +224,7 @@ Go Orchestrator と Vite Dev Server を停止します。mlx-serve のプロフ�
 | `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | 全リクエストに付ける `model`。mlx-serve のプロファイル名と一致させる |
 | `LLM_TIMEOUT_SEC` | `300` | LLM 1 リクエストのタイムアウト (秒) |
 | `STAGE_RETRY_LIMIT` | `2` | 検証 NG の段を再思考させる回数 (0 で再試行なし) |
-| `TURN_TIMEOUT_SEC` | `900` | 1 ターン全体 (全段・再思考込み) の上限 (秒)。超えたターンは開始前に戻る |
+| `TURN_TIMEOUT_SEC` | `900` | 1 ターン全体 (全段・再思考込み) の上限 (秒)。超えたターンは止まり、続きから再開できる (再開のたびに数え直す) |
 | `APC_TENANT` | `sw25` | `X-APC-Tenant` ヘッダーで送る名前。mlx-vlm のプレフィックスキャッシュを他のアプリと分ける |
 | `IMAGES_URL` | `http://127.0.0.1:11462` | MLX の画像工房 (mlx-studio-web) のエンドポイント |
 | `IMAGE_EVERY` | `3` | 1 ターン目と、以降このターン数ごとにシーン画像を描く。`0` で画像なし |
@@ -260,7 +268,7 @@ uv run ai-agents/fix_rulebook_ocr.py --apply    # 原本をバックアップし
 ### ハウスルール・訂正テキストの追加
 
 ```bash
-uv run ai-agents/ocr_rulebook.py <file> [--source-type correction|houserule] [--db PATH]
+uv run ai-agents/ocr_rulebook.py <file> [--source-type correction|houserule] [--tag TAG] [--db PATH]
 ```
 
 - 短いハウスルール集・訂正集 (`.pdf` / `.md` / `.txt`) を 500 文字単位で取り込む。ルールブック本体には使わない
@@ -316,8 +324,9 @@ go test ./...
 |------|------|
 | `orchestrator/cmd/server/main.go` | エントリーポイント |
 | `orchestrator/pkg/api/handler.go` | HTTP / WebSocket ルーター |
-| `orchestrator/pkg/api/sessions.go` | セッション API、ターンの実行 (排他・中断・やり直し・巻き戻し) |
+| `orchestrator/pkg/api/sessions.go` | セッション API、ターンの実行 (排他・中断・再開・取り消し・やり直し・巻き戻し) |
 | `orchestrator/pkg/game/turn.go` | ターン処理ロジック |
+| `orchestrator/pkg/game/progress.go` | 途中結果の保存と止まったターンの再開 (DB 側は `pkg/db/progress.go`) |
 | `orchestrator/pkg/game/context.go` | 固定の前置き (卓の約束・クエスト・PC・NPC ペルソナ) と直近ターン |
 | `orchestrator/pkg/game/summary.go` | セッションのあらすじ |
 | `orchestrator/pkg/game/checks.go` | 判定 (2d6) |
@@ -340,13 +349,13 @@ npm run lint     # ESLint チェック
 OMNI_API=host:port npx vite   # 別のオーケストレーターに向ける (既定 localhost:8080)
 ```
 
-開発サーバーで `?mock=1` を付けて開くと、オーケストレーターなしで作り物のターンを再生します。
+開発サーバーで `?mock=1` を付けて開くと、オーケストレーターなしで作り物のターンを再生します。UI の詳細は [ui/README.md](ui/README.md) を参照してください。
 
 主要ディレクトリ:
 
 | パス | 役割 |
 |------|------|
-| `ui/src/views/` | 開始・セッション (`session/`)・クエスト・パーティ (`party/`)・ルール (`rules/`) の画面 |
+| `ui/src/views/` | 開始・セッション (`session/`。止まったターンは `StoppedTurnView.tsx`)・クエスト・パーティ (`party/`)・ルール (`rules/`) の画面 |
 | `ui/src/components/` | ヘッダー・モーダル・HP/MP バー等の共通部品 |
 | `ui/src/hooks/useSessionGame.ts` / `useSessionSocket.ts` | セッションの状態と WebSocket |
 | `ui/src/live/turnReducer.ts` | 進行中のターンの表示 (段・本文・判定) |
@@ -369,6 +378,10 @@ uv run <script>.py --help
 uv run pytest
 ```
 
+### コミット前のチェック
+
+`./setup.sh` が `hooks/pre-commit` を `.git/hooks/pre-commit` に入れます。コミットのたびに、ステージした内容を gitleaks (設定は `.gitleaks.toml`) と trufflehog で調べ、秘密情報や個人のパス・LAN のアドレスが見つかればコミットを止めます (未インストールの検査は飛ばします)。ルールブック (`data/rulebook/`)・`config.env`・ペルソナ (`data/personas/`。サンプルを除く)・DB・生成画像は `.gitignore` で管理外です。
+
 ---
 
 ## ドキュメント (Documentation)
@@ -376,13 +389,17 @@ uv run pytest
 | ファイル | 内容 |
 |---------|------|
 | [docs/api.md](docs/api.md) | オーケストレーター API の取り決め (UI との契約) |
+| [ui/README.md](ui/README.md) | フロントエンドの開発メモ |
 | [docs/spec_ja.md](docs/spec_ja.md) | システム仕様書 (日本語) |
 | [docs/spec_en.md](docs/spec_en.md) | System Specification (English) |
 | [docs/maintenance_ja.md](docs/maintenance_ja.md) | 運用手順書 (日本語) |
 | [docs/maintenance_en.md](docs/maintenance_en.md) | Maintenance Guide (English) |
 | [docs/tools_ja.md](docs/tools_ja.md) | バッチツールリファレンス (日本語) |
 | [docs/tools_en.md](docs/tools_en.md) | Batch Tools Reference (English) |
+| [omni-master-migration.md](omni-master-migration.md) | mlx-serve 移行・単一モデル直列化の計画 (2026-09) |
 | [docs/plan-retune-20261112.md](docs/plan-retune-20261112.md) | MLX 基盤に合わせた再チューニングと UI 改修の計画 |
+| [docs/verification-20261113.md](docs/verification-20261113.md) | 再チューニング後の通し検証結果 |
+| [docs/superpowers/specs/2026-11-14-turn-resume-design.md](docs/superpowers/specs/2026-11-14-turn-resume-design.md) | 止まったターンの再開の設計 (実装計画は `docs/superpowers/plans/`) |
 | [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md) | mlx-serve クライアント検証メモ |
 | [docs/verification-serial-20260927.md](docs/verification-serial-20260927.md) | 単一モデル直列化の通し検証結果 |
 | [docs/verification-apc-20261005.md](docs/verification-apc-20261005.md) | 1 ターン 1 会話化とプレフィックスキャッシュ (APC) の計測 |

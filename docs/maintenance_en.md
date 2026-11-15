@@ -39,7 +39,7 @@ Verification:
 - UI: `http://localhost:5173` (the header shows whether the LLM, embedding model and image studio are up; a banner says what is down)
 - API: `http://localhost:8080` (`curl http://localhost:8080/api/system` returns the same status)
 
-In the UI, create a session with 新しく on the start screen, or open an earlier one from 続きから.
+In the UI, create a session with 新しく on the start screen, or open an earlier one from 続きから. A session marked ⏸ 止まっています has a stopped turn ([1.4](#14-resuming-or-discarding-a-stopped-turn)).
 
 ### 1.2 Stopping a Session
 
@@ -62,6 +62,35 @@ tail -f logs/orchestrator.log logs/ui.log
 
 LLM inference logs live on the mlx-serve side (see the mlx-serve README). Each stage's output and its re-thinking history (`[NG 1/3] ...`) are recorded in the `session_logs` table.
 
+### 1.4 Resuming or Discarding a Stopped Turn
+
+When a turn stops because it failed (the LLM is unreachable, the GM's output never validates, …), was stopped (⏹ 止める) or timed out (`TURN_TIMEOUT_SEC`), the stages it finished (the GM's narration, NPCs that acted, checks already rolled) stay in the DB and the Session screen shows 「ターン N が途中で止まりました」 with the cause.
+
+| Button | What it does |
+|--------|--------------|
+| ▶ 続きから | Starts the stopped stage over and runs the turn to its end. Finished stages are not redone and rolled dice stand |
+| 取り消す | Drops the progress and goes back to before that turn |
+| ✎ 直す | Discards the turn, then sends the edited input as a new turn |
+
+- If the cause is on the LLM side (mlx-serve down or overloaded), fix mlx-serve first, then press 続きから ([8. Troubleshooting](#8-troubleshooting))
+- A stopped turn survives stopping and restarting the orchestrator. A turn that was running when the orchestrator stopped also becomes a stopped turn at the next start (`logs/orchestrator.log` says `turn(s) left running were marked stopped`)
+- While a stopped turn exists, that session refuses new turns, redo, restore, accepting a quest, editing or swapping NPCs and moving them. Editing, deleting or switching PCs is refused while any session has a stopped turn (the message names the session). Choose 続きから or 取り消す first
+- If the NPC line-up changed after the turn stopped, it cannot be resumed, only discarded (the restrictions above normally prevent this)
+
+To check in the DB:
+
+```bash
+sqlite3 data/omni.db \
+  "SELECT session_id, turn, status, error, updated_at FROM turn_progress;"
+```
+
+Through the API (session ID 3 as an example):
+
+```bash
+curl -X POST http://localhost:8080/api/sessions/3/resume    # resume
+curl -X POST http://localhost:8080/api/sessions/3/discard   # discard
+```
+
 ---
 
 ## 2. Database Management
@@ -75,7 +104,7 @@ Deletes every session (with its turns, checkpoints and summary) and the quests. 
 ```
 
 Tables cleared:
-- `sessions` (cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`)
+- `sessions` (cascades to `npc_sheets`, `session_logs`, `checkpoints`, `turn_results`, `session_summaries`, `turn_progress`)
 - `quests`
 
 Tables preserved:
@@ -86,13 +115,13 @@ Tables preserved:
 
 To delete a single session, do not use `setup.sh`; use the 🗑 button under 続きから on the start screen.
 
-### 2.2 Full Reset (Erase All Data)
+### 2.2 Full Reset (Rule Data Too)
 
 ```bash
 ./setup.sh --full
 ```
 
-Drops all tables including `rag_chunks`. Rulebook data must be re-imported afterward.
+On top of what 2.1 clears, deletes `rag_chunks` (rulebook, house rules and corrections; `rag_chunks_opt` goes with it by cascade). PC sheets and scenarios are kept. Rulebook data must be re-imported afterward.
 
 ### 2.3 Direct Database Access
 
@@ -405,9 +434,11 @@ curl -X POST http://localhost:8080/api/player-characters \
   -H 'Content-Type: application/json' \
   -d '{"name": "Lina", "json_blob": "{...}"}'
 
-# Activate a PC for the current session
+# Activate a PC (one PC is active across all sessions)
 curl -X PATCH http://localhost:8080/api/player-characters/1/activate
 ```
+
+While any session has a stopped turn, updating (`PUT`), deleting, activating and deactivating a PC return 409 (creating one still works).
 
 ---
 
@@ -429,7 +460,7 @@ Undoing turns does not need DEV mode; it is done on the Session screen:
 
 - ⟲ このターンの前に戻す (or 「戻す」 on a checkpoint in the side panel): go back to before that turn and delete the later turns. NPC HP/MP and placement go back too
 - ↻ 作り直す / ✎ 入力欄に戻して直す: redo the last turn
-- ⏹ 止める: cancel the running turn (it is as if it never happened)
+- ⏹ 止める: stop the running turn. The finished stages are kept; continue with ▶ 続きから or drop the turn with 取り消す ([1.4](#14-resuming-or-discarding-a-stopped-turn))
 
 Only the latest 10 checkpoints per session are kept. There is no UI to delete one, but the API can:
 
@@ -471,6 +502,11 @@ grep mlx-serve logs/orchestrator.log
 ```
 
 - Make sure `LLM_MODEL_ID` / `EMBED_MODEL_ID` match the mlx-serve profile names. mlx-vlm returns 422 when `model` is missing and reloads the resident model when a different name is sent.
+- If the LLM went down in the middle of a turn, that turn is kept as a stopped turn. Start mlx-serve again, then continue with ▶ 続きから on the Session screen ([1.4](#14-resuming-or-discarding-a-stopped-turn))
+
+### "止まったターンがあります" (409)
+
+That session (for PC operations: some session) still has a stopped turn. Open the session named in the message and choose ▶ 続きから or 取り消す ([1.4](#14-resuming-or-discarding-a-stopped-turn)).
 
 ### An NPC Does Not Act / HP and MP Are Applied As-Is
 
@@ -502,11 +538,11 @@ uv run ai-agents/embed_chunks.py --reembed-all
 ### Turn Processing Timeout / "Turn in Progress"
 
 - Sending a turn returns 202 right away and the UI waits on WebSocket progress events. There is no UI-side timeout
-- Cap per turn: `TURN_TIMEOUT_SEC` in `config.env` (default 900 seconds). A turn that runs over goes back to its start and an error is shown
+- Cap per turn: `TURN_TIMEOUT_SEC` in `config.env` (default 900 seconds). A turn that runs over stops and keeps its finished stages; resuming it with ▶ 続きから starts the cap again
 - Timeout per LLM request: `LLM_TIMEOUT_SEC` (default 300 seconds)
 - All stages run serially on one model, so a turn takes GM + each NPC + Support. Re-thinking adds to that (check `stage_attempts`), and every few turns a summary update follows
 - To favor speed, lower `STAGE_RETRY_LIMIT`. Also check that the Gemma profile has the recommended APC settings (§1.1)
-- Only one turn runs per session. Sending while one runs (including the summary update) returns 409 「このセッションではターンを処理中です」; wait for it to finish or cancel it with ⏹
+- Only one turn runs per session. Sending while one runs (including the summary update) returns 409 「このセッションではターンを処理中です」; wait for it to finish or stop it with ⏹ (a stopped turn can be resumed)
 
 ### Scene Images Not Generating
 

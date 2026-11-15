@@ -22,6 +22,7 @@ The contract between the UI and the orchestrator (endpoints, WebSocket events, t
 | **Image Generation** | The MLX image studio (mlx-studio-web) draws a scene image every few turns |
 | **Real-time UI** | WebSocket streams each stage's progress and the GM / NPC text as it is generated |
 | **Session Management** | Create and delete multiple sessions; cancel, redo, and restore to before any turn (the latest 10 checkpoints are kept) |
+| **Resuming a Stopped Turn** | A turn that failed, was cancelled or timed out keeps its finished stages in the DB. Continue from the stage that stopped, or discard it (it survives an orchestrator restart) |
 | **Batch Maintenance** | Rulebook chunking, embedding generation and scenario pre-generation run offline |
 
 ---
@@ -96,13 +97,15 @@ sw25-omni-master/
 │   └── pkg/
 │       ├── api/
 │       │   ├── handler.go      # HTTP routes and WebSocket
-│       │   ├── sessions.go     # Session API, running turns (one at a time, cancel, redo, restore)
+│       │   ├── sessions.go     # Session API, running turns (one at a time, cancel, resume, discard, redo, restore)
 │       │   └── extras.go       # System status, rule search, scene images
 │       ├── config/config.go    # Configuration loader
 │       ├── db/                 # SQLite access layer
 │       │   ├── schema.sql      # Table definitions
+│       │   ├── db.go           # Connection, schema, added columns
 │       │   ├── sessions.go
 │       │   ├── checkpoints.go
+│       │   ├── progress.go     # Turn in progress (turn_progress) and finishing a turn
 │       │   ├── rag.go
 │       │   ├── scenarios.go
 │       │   ├── quests.go
@@ -110,6 +113,8 @@ sw25-omni-master/
 │       ├── game/               # Game logic
 │       │   ├── turn.go         # Turn orchestration
 │       │   ├── types.go        # Data type definitions
+│       │   ├── events.go       # Progress events (stage, text delta, rules, check)
+│       │   ├── progress.go     # Saving progress and resuming a stopped turn
 │       │   ├── stage.go        # Per-stage call, validation and re-thinking
 │       │   ├── validate.go     # GM / NPC / Support output validation
 │       │   ├── context.go      # Fixed session prefix and recent turns
@@ -123,6 +128,8 @@ sw25-omni-master/
 │   └── src/
 │       ├── App.tsx             # Root, navigation
 │       ├── views/              # Start, session/, quests, party/, rules/
+│       ├── components/         # Header, modal, HP/MP bars
+│       ├── dialogs/            # Confirm / notice dialogs
 │       ├── hooks/              # useSessionGame.ts, useSessionSocket.ts, useSystemStatus.ts
 │       ├── live/turnReducer.ts # Display of the running turn
 │       ├── styles/             # theme.css, ui.css (shared look with the MLX screens)
@@ -132,6 +139,8 @@ sw25-omni-master/
 │   ├── mlx_client.py           # Shared mlx-serve helpers
 │   ├── build_rulebook.py       # Rulebook (re)builder
 │   ├── rulebook_chunker.py     # Rulebook Markdown chunker
+│   ├── fix_rulebook_ocr.py     # OCR typo fixes for the rulebook source
+│   ├── find_ocr_suspects.py    # Finds suspected OCR typos
 │   ├── ocr_rulebook.py         # House rule / correction text importer
 │   ├── embed_chunks.py         # Embedding generator
 │   ├── optimize_chunks.py      # Chunk optimizer (optional, legacy)
@@ -148,10 +157,12 @@ sw25-omni-master/
 │       └── sessions/{id}/      # Session scene images (IMAGES_DIR)
 ├── docs/                       # Documentation
 ├── logs/                       # Service logs
-├── config.env                  # Configuration file
+├── hooks/pre-commit            # Secret check before commits (setup.sh links it into .git/hooks)
+├── config.env                  # Configuration file (not in git; copy config.env.example)
 ├── scripts/
 │   ├── Start-Omni.ps1          # Start orchestrator + UI
-│   └── Stop-Omni.ps1           # Stop orchestrator + UI
+│   ├── Stop-Omni.ps1           # Stop orchestrator + UI
+│   └── OmniMaster.Common.psm1  # Shared functions (reading config.env, port checks)
 └── setup.sh                    # DB initialization / reset
 ```
 
@@ -169,7 +180,7 @@ Values in `config.env` are loaded by `scripts/Start-Omni.ps1` and the Go server 
 | `LLM_MODEL_ID` | `gemma4-31b-it-heretic-4bit-mtp` | `model` sent with every request. Must match the mlx-serve profile name |
 | `LLM_TIMEOUT_SEC` | `300` | Timeout per LLM request (seconds) |
 | `STAGE_RETRY_LIMIT` | `2` | How many times a stage is re-thought after its output fails validation (0 = no retry) |
-| `TURN_TIMEOUT_SEC` | `900` | Cap on a whole turn (all stages and re-thinks), in seconds. A turn that runs over is rolled back to its start |
+| `TURN_TIMEOUT_SEC` | `900` | Cap on a whole turn (all stages and re-thinks), in seconds. A turn that runs over becomes a stopped turn and can be resumed (§8.6; the cap starts again on each resume) |
 | `APC_TENANT` | `sw25` | Sent as the `X-APC-Tenant` header on chat requests, keeping mlx-vlm's prefix cache apart from other apps |
 | `IMAGES_URL` | `http://127.0.0.1:11462` | MLX image studio (mlx-studio-web) endpoint |
 | `IMAGE_EVERY` | `3` | Draw a scene image on turn 1 and every N-th turn after. `0` = no images |
@@ -188,7 +199,7 @@ Values in `config.env` are loaded by `scripts/Start-Omni.ps1` and the Go server 
 ## 6. Database Schema
 
 ### 6.1 sessions
-Session-level metadata. Sessions are created from the UI (`POST /api/sessions`); there can be any number of them. Deleting a session cascades to its NPC sheets, logs, checkpoints, turn results and summary.
+Session-level metadata. Sessions are created from the UI (`POST /api/sessions`); there can be any number of them. Deleting a session cascades to its NPC sheets, logs, checkpoints, turn results, summary and turn in progress.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -232,7 +243,7 @@ Snapshots taken before each turn. Only the latest 10 per session are kept.
 | `snapshot_json` | TEXT | Snapshot of the NPC sheets (HP/MP, placement, YAML) as JSON |
 | `created_at` | DATETIME | Save timestamp |
 
-"Back to before turn N" (restore, redo, and undoing a failed turn) writes the NPC sheets back from turn N's checkpoint and deletes the logs, turn results, summary and checkpoints from turn N on.
+"Back to before turn N" (restore, redo, and discarding a stopped turn) writes the NPC sheets back from turn N's checkpoint and deletes the logs, turn results, summary, checkpoints and turn in progress from turn N on.
 
 ### 6.5 turn_results
 Finished turns (`TurnResult` as JSON). The source of the UI's chat log and of the recent turns sent to the LLM.
@@ -338,6 +349,22 @@ Images linked to scenarios (`scenario_id=NULL` means shared background).
 | `prompt_text` | TEXT | Generation prompt used |
 | `width` / `height` | INTEGER | Image dimensions (px) |
 
+### 6.13 turn_progress
+The turn in progress, kept so a stopped turn can resume from the last stage it finished (§8.6). At most one row per session; it is deleted when the turn finishes or is discarded.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `session_id` | INTEGER PK / FK | Session ID |
+| `turn` | INTEGER | Turn number |
+| `input` | TEXT | The player's input |
+| `mode` | TEXT | `action` / `gm` |
+| `state_json` | TEXT | Progress as JSON: finished stages (`done`), stage instructions and answers (`transcript`), check results (`facts`), the `TurnResult` so far (`result`), the NPC names at the start (`npcs`) and the log position at the last finished stage (`log_mark`). Rewritten whole after every stage |
+| `status` | TEXT | `running` / `stopped` |
+| `error` | TEXT | Why it stopped |
+| `updated_at` | DATETIME | Last update timestamp |
+
+> The schema still has an `npc_portraits` table, but the current code does not use it.
+
 ---
 
 ## 7. API Endpoints
@@ -348,7 +375,7 @@ Images linked to scenarios (`scenario_id=NULL` means shared background).
 |------|----------------|
 | System | `GET /api/system` (LLM, embedding and image studio status, plus `apc_tenant`) |
 | Sessions | `GET/POST /api/sessions`, `GET/DELETE /api/sessions/{id}` |
-| Turns | `POST /api/sessions/{id}/turn` (202; 409 while a turn runs), `/cancel`, `/redo`, `/restore`, `/quest` |
+| Turns | `POST /api/sessions/{id}/turn` (202; 409 while a turn runs or a stopped turn exists), `/cancel`, `/resume`, `/discard`, `/redo`, `/restore`, `/quest` |
 | Scene images | `GET /api/sessions/{id}/images/{file}` |
 | Party | `GET /api/personas`, `POST/DELETE /api/npc-sheet`, `PATCH /api/npc-sheet/{id}`, `PATCH /api/npc-position` |
 | PCs | `GET/POST /api/player-characters`, `PUT/DELETE /api/player-characters/{id}`, `PATCH .../{id}/activate` / `/deactivate` |
@@ -364,7 +391,7 @@ Rules added or edited (`POST /api/rules`, `PATCH /api/rules/{id}`) are embedded 
 
 ## 8. Game Engine Processing Flow
 
-Every LLM stage calls the same chat model (`LLM_URL`), one stage at a time. Only one turn runs per session; sending, redoing, restoring or deleting while a turn runs (including the summary update) returns 409.
+Every LLM stage calls the same chat model (`LLM_URL`), one stage at a time. Only one turn runs per session; sending, redoing, restoring or deleting while a turn runs (including the summary update) returns 409, and so does editing, adding, removing or moving an NPC sheet.
 
 ```
 Player → POST /api/sessions/{id}/turn  → 202 {"turn": N} (the server assigns the number)
@@ -373,7 +400,10 @@ Player → POST /api/sessions/{id}/turn  → 202 {"turn": N} (the server assigns
        │  Checkpoint      │ ← Save the NPC sheets as they are before turn N (latest 10 kept)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  Session context │ ← Fixed prefix + summary + last 2 turns (§8.4)
+       │  Session context │ ← Fixed prefix + summary + turns not yet summarized (§8.4)
+       └────────┬─────────┘
+       ┌────────▼─────────┐
+       │  Save progress   │ ← Create turn_progress; saved again after every stage (§8.6)
        └────────┬─────────┘
        ┌────────▼─────────┐
        │  RAG Search      │ ← Search rules with the player input (top 5, §12)
@@ -390,7 +420,8 @@ Player → POST /api/sessions/{id}/turn  → 202 {"turn": N} (the server assigns
        │                  │   HP/MP deltas with the check results (JSON array)
        └────────┬─────────┘
        ┌────────▼─────────┐
-       │  DB Update       │ ← npc_sheets HP/MP and lanes, turn_results, session_logs
+       │  Finish the turn │ ← npc_sheets HP/MP and lanes, save turn_results, delete
+       │                  │   turn_progress (one transaction)
        └────────┬─────────┘
                 │ WebSocket: turn (the finished turn)
        ┌────────▼─────────┐
@@ -403,21 +434,21 @@ Player → POST /api/sessions/{id}/turn  → 202 {"turn": N} (the server assigns
 
 GM and NPC text is received from mlx-serve as SSE and passed to the UI as `delta` events. Each stage's start, re-think and end arrive as `stage` events, the rules given to a stage as `rules`, and checks as `check`.
 
-When a turn fails (the GM never validates, a transport error, …), is cancelled (`/cancel`), or runs past `TURN_TIMEOUT_SEC` (default 900 s), the session goes back to its state before turn N and an `error` event is sent. `LLM_TIMEOUT_SEC` caps each single request.
+When a turn fails (the GM never validates, a transport error, …), is cancelled (`/cancel`), or runs past `TURN_TIMEOUT_SEC` (default 900 s), it becomes a "stopped turn" that keeps its finished stages, and an `error` event with `resumable: true` is sent. The player then resumes it or discards it to go back to its start (§8.6). Only a failure before progress is first saved puts the session back to its state before turn N (`resumable: false`). `LLM_TIMEOUT_SEC` caps each single request.
 
 Redo (`/redo`) goes back to before the given turn and sends the input again in the same mode (action / appeal), optionally with new text (the UI only redoes the last turn). Restore (`/restore`) only goes back. Both work only for turns whose checkpoint is still kept (the latest 10).
 
 ### 8.1 Per-Stage Validation and Re-thinking
 
-Each LLM stage's output is validated. If it fails, only that stage is called again ("re-thinking"): the rejected output and the error message are appended to the conversation, and thinking is enabled (`enable_thinking=true`, `max_tokens` +2048). A stage is retried at most `STAGE_RETRY_LIMIT` times (default 2, i.e. up to 3 calls). Transport errors are not retried.
+Each LLM stage's output is validated. If it fails, only that stage is called again ("re-thinking"): the rejected output and the error message are appended to the conversation, and thinking is enabled (`enable_thinking=true`, `max_tokens` +2048). A stage is retried at most `STAGE_RETRY_LIMIT` times (default 2, i.e. up to 3 calls). Transport errors are not retried; the turn stops (§8.6).
 
 | Stage | Rejected when | When retries run out |
 |-------|---------------|----------------------|
-| GM | Empty (after the check lines are taken out) / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn fails (rolled back to its start) |
+| GM | Empty (after the check lines are taken out) / truncated (`finish_reason=length`) / a refusal / outputs YAML or JSON | The turn stops (§8.6; resuming starts again from the GM stage) |
 | NPC | YAML does not parse / `name` differs from the sheet / `action` or `dialogue` empty / `mp_cost` outside 0..current MP / `hp_delta` < -current HP / `new_lane` not `enemy`, `front` or `party` | That NPC sits out the turn (recorded in `warnings`) |
 | Support | Not a JSON array / not exactly one entry per acting NPC (unknown or duplicate names) / values out of range | The NPCs' own `hp_delta` / `mp_cost` are used (recorded in `warnings`) |
 
-Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`. When a re-think starts, a `stage` event with `status: retry` arrives and the UI discards that stage's text and receives it again.
+Truncated output (`finish_reason=length`) is rejected at every stage. Every attempt is written to `session_logs`. A speaker label at the start of the GM's output (`GM:`, `【GM】`) is removed before validation. When a re-think starts, a `stage` event with `status: retry` arrives and the UI discards that stage's text and receives it again.
 
 ### 8.2 LLM Requests
 
@@ -492,6 +523,26 @@ Check outcomes are decided by code, not by the LLM (`pkg/game/checks.go`).
 - When an NPC's `check` cannot be read, the action is kept, the check is not rolled, and a warning is recorded (no re-think)
 - The code rolls 2d6; dice + base ≥ target succeeds. A natural 12 always succeeds, a natural 2 always fails
 - Results are passed to later stages (NPCs, Support) as `【判定結果（システムが振ったサイコロ）】` and to the UI as `check` events, shown as dice chips. The next turn's GM narrates according to the recent turns' results
+- Full-width digits and signs (`１２`, `＋`) and the full-width slash (`／`) are read too
+
+### 8.6 Resuming a Stopped Turn
+
+A turn saves its progress to `turn_progress` (§6.13) after every stage (GM, each NPC, Support) (`pkg/game/progress.go`, `pkg/db/progress.go`). Once that has started, a failure (transport error, the GM running out of re-thinks, a DB error), a cancel (`/cancel`) or a timeout no longer rolls the session back: the row is marked `stopped` and the turn stays as a "stopped turn".
+
+| Action | What happens |
+|--------|--------------|
+| Resume (`POST /api/sessions/{id}/resume`) | Finished stages are not called again; the stage that stopped starts over and the turn runs to its end. Like a new turn it returns 202 and progress arrives over WebSocket. `TURN_TIMEOUT_SEC` starts again on each resume |
+| Discard (`POST /api/sessions/{id}/discard`) | Drops the progress and puts the session back to its state before that turn |
+
+- Dice already rolled are never rolled again. Check results are part of the saved progress and reach the later stages unchanged (re-rolling would let the player pick an outcome)
+- On resume the session context (§8.4) is rebuilt and the finished stages' instructions and answers are replayed after it in the same order. The remaining stages send the same message sequence as an uninterrupted turn, so APC still applies
+- What the stopped stage logged (such as `[NG n/m]` attempts) is deleted before resuming. After the turn finishes, `session_logs` and `turn_results` are the same as for an uninterrupted turn
+- An NPC that never validated and sat out counts as a finished stage (it is not called again on resume)
+- While a stopped turn exists, changes that would contradict the saved progress are refused with 409: sending a new turn, redo, restore, changing the session's quest, editing / adding / removing / moving NPC sheets, and editing / deleting / switching PCs (conditions and messages are in [api.md](api.md)). Creating a PC and accepting or completing a quest globally are not refused
+- If the NPC line-up changed after the turn stopped, resuming is refused (it can only be discarded)
+- A session has at most one stopped turn. It is not in `turn_results`, so it does not leak into the chat log, the summary or the next turn's context
+- At orchestrator startup, rows still marked `running` are set to `stopped` (the process that ran them is gone), so a turn can be resumed after a restart too
+- Finishing a turn (updating NPC HP/MP and lanes, saving `turn_results`, deleting `turn_progress`) is one transaction; a crash in the middle cannot apply the HP/MP changes twice
 
 ---
 
@@ -501,8 +552,8 @@ The UI uses the theme shared with the MLX screens (`ui/src/styles/theme.css`, `u
 
 | Screen | Nav Label | Description |
 |--------|-----------|-------------|
-| **Start** | セッション (no session open) | 続きから (recent sessions, which can also be deleted) and 新しく (create with a title and quest) |
-| **Session** | セッション | Chat log (player, GM and NPC bubbles), live per-stage progress and streamed text, dice / rule / re-think / skipped chips, ⏹ stop, ↻ redo, ✎ edit the input and redo, ⟲ back to before this turn, action / GM-appeal input. A side panel (a drawer on phones) with party HP/MP bars, the 3-lane formation, the PC, the quest, the summary and checkpoints |
+| **Start** | セッション (no session open) | 続きから (recent sessions, which can also be deleted; a session with a stopped turn is marked ⏸ 止まっています) and 新しく (create with a title and quest) |
+| **Session** | セッション | Chat log (player, GM and NPC bubbles), live per-stage progress and streamed text, dice / rule / re-think / skipped chips, ⏹ stop, ↻ redo, ✎ edit the input and redo, ⟲ back to before this turn, action / GM-appeal input. A side panel (a drawer on phones) with party HP/MP bars, the 3-lane formation, the PC, the quest, the summary and checkpoints. A stopped turn keeps showing the results of its finished stages with ▶ 続きから (resume), 取り消す (discard) and ✎ 直す (discard, then send an edited input); until one is chosen, the input box and the other actions are locked |
 | **Quests** | クエスト | Quest list with party-level eligibility, accept (makes it the open session's quest) and complete |
 | **Party** | パーティ | This session's NPCs (add up to 3 from personas, remove, details and editing) and PCs (create, edit, switch the active one). NPC editing changes values while keeping unknown YAML keys |
 | **Rules** | ルール | The same search the game uses, a paged and filtered list, adding house rules and corrections, enable/disable toggle. Shows each chunk's part > chapter > heading and pages |
@@ -512,7 +563,7 @@ Activated via the "DEV" button in the header. It enables direct YAML editing in 
 
 ### Development
 - `OMNI_API=host:port npx vite` points the dev server at another orchestrator (default `localhost:8080`)
-- Opening the UI with `?mock=1` replays a mock turn without an orchestrator
+- Opening the dev server with `?mock=1` replays a mock turn without an orchestrator (off in production builds)
 
 ---
 

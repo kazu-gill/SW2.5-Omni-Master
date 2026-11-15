@@ -71,7 +71,7 @@ WS  image  (数ターンごと、後から)
 | `PUT` / `DELETE /api/player-characters/{id}`、`PATCH .../activate`、`.../deactivate` | どこかのセッションに止まったターンがある (PC の作成は断らない)。本文は止まったセッションを名指しする: `セッション「<title>」(#<id>) に止まったターンがあります。そのセッションで「続きから」か「取り消す」を先に選んでください` |
 
 グローバルなクエストの受注・完了 (`PATCH /api/quests/{id}/accept`、`.../complete`) は断らない。止まったターンが読むクエストはセッション側 (`sessions.quest_id`) だけなので影響しない。
-`PATCH /api/npc-sheet/{id}` は、ターンが実行中のセッションでも 409 (ターン確定時に全シートを開始時の写しから書き直すため)。
+NPC シートの編集・追加・削除・配置の変更 (`PATCH /api/npc-sheet/{id}`、`POST` / `DELETE /api/npc-sheet`、`PATCH /api/npc-position`) は、ターンが実行中のセッションでも 409 (ターン確定時に全シートを開始時の写しから書き直すため)。
 
 ### パーティ・PC・クエスト・ルール (既存を継続)
 | メソッド | パス | 備考 |
@@ -81,13 +81,15 @@ WS  image  (数ターンごと、後から)
 | DELETE | `/api/npc-sheet` | `{"session_id","name"}` |
 | PATCH | `/api/npc-sheet/{id}` | `{"hp","mp","yaml_blob"?}`。yaml_blob を送るときは **元の YAML のキーを保ったまま** 値だけ変えたものを送る |
 | PATCH | `/api/npc-position` | `{"session_id","name","lane": "enemy"\|"front"\|"party"}` |
-| GET/POST/PUT/DELETE | `/api/player-characters[/{id}]`、`PATCH .../{id}/activate` | 既存どおり |
+| GET/POST/PUT/DELETE | `/api/player-characters[/{id}]`、`PATCH .../{id}/activate`・`.../deactivate` | 既存どおり |
 | GET | `/api/quests` | 既存どおり |
-| PATCH | `/api/quests/{id}/complete` | 既存どおり |
+| PATCH | `/api/quests/{id}/accept`・`.../complete` | 既存どおり (グローバルな状態。セッションの受注は `POST /api/sessions/{id}/quest`) |
 | GET | `/api/rules?q=&source_type=&limit=50&offset=0` | `{"total","items":[Rule]}`。q は本文・節の部分一致。空の q / source_type は絞り込みなし |
 | GET | `/api/rules/search?q=&k=5` | `[RuleHit]`。ゲーム中と同じ検索 (埋め込み + 用語の完全一致) |
 | POST/PATCH/DELETE | `/api/rules[/{id}]` | 既存どおり (保存時に埋め込む) |
 | GET | `/api/sessions/{id}/images/{file}` | 生成画像 (png) |
+| GET/PATCH | `/api/scenarios`、`/api/scenarios/{id}`、`/api/scenarios/backgrounds`、`/api/scenarios/{id}/image/{imgid}`、`PATCH /api/scenarios/{id}/status` | バッチ生成したシナリオ素材。既存どおり (今の UI は使わない) |
+| DELETE | `/api/checkpoint/{id}` | チェックポイントを 1 件消す (UI は使わない) |
 
 ## WebSocket `/ws?session_id={id}`
 
