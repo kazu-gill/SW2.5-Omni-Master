@@ -6,7 +6,7 @@
 
 ## 1. System Overview
 
-**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". A single local chat LLM handles the Game Master (GM), NPC and Support (resource validation) roles one after another, generating responses to player action declarations. The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform; Omni-Master itself does not launch any inference process. Rule consistency is maintained by retrieving relevant rulebook passages via vector search and a term index (RAG), and optional integration with the MLX image studio (mlx-studio-web) enables automated scene image generation.
+**SW2.5 Omni-Master** is an AI-driven orchestration system for the TRPG "Sword World 2.5". A single local chat LLM handles the Game Master (GM), NPC and Support (resource validation) roles one after another, generating responses to player action declarations. The LLMs are served by mlx-serve (`~/AI/MLX`), a separate inference platform; Omni-Master itself does not launch any inference process. Rule consistency is maintained by retrieving relevant rulebook passages via vector search and a term index (RAG), and optional integration with the MLX image studio (mlx-studio-web) enables automated scene image generation.
 
 The contract between the UI and the orchestrator (endpoints, WebSocket events, types) is [api.md](api.md). This document describes the processing behind it.
 
@@ -43,7 +43,7 @@ The contract between the UI and the orchestrator (endpoints, WebSocket events, t
 └──────────────────────┼──────────────────────────────┘
                        │
 ┌──────────────────────▼──────────────────────────────┐
-│  mlx-serve (/Users/kf/AI/MLX, separate repo)        │
+│  mlx-serve (~/AI/MLX, separate repo)        │
 │  ┌─────────────────────────────┐ ┌────────────────┐ │
 │  │ Chat LLM :11441              │ │ Embed :11455   │ │
 │  │ gemma4-31b-it-heretic-4bit-  │ │ bge-m3-q8      │ │

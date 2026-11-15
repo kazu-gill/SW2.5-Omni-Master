@@ -139,7 +139,7 @@ def main() -> None:
     if not ping(args.embed_url):
         print(f"埋め込みサーバに接続できません: {args.embed_url}", file=sys.stderr)
         print(
-            f"  pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile {args.embed_model_id}",
+            f"  pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile {args.embed_model_id}",
             file=sys.stderr,
         )
         sys.exit(1)

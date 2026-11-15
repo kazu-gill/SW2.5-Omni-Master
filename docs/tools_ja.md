@@ -4,7 +4,7 @@
 
 本ドキュメントでは、プロジェクト付属のシェル / PowerShell スクリプトおよび Python ユーティリティの詳細な使い方を説明します。
 
-LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-serve（`/Users/kf/AI/MLX`）が提供します。本プロジェクトのスクリプトは LLM プロセスを起動しません。
+LLM（チャット・埋め込み）は別リポジトリの推論基盤 mlx-serve（`~/AI/MLX`）が提供します。本プロジェクトのスクリプトは LLM プロセスを起動しません。
 
 ---
 
@@ -110,8 +110,8 @@ pwsh scripts/Start-Omni.ps1 [-Follow]
 1. `.pids` が残っていれば終了（二重起動防止。先に `Stop-Omni.ps1` を実行）
 2. `LLM_URL` と `EMBED_URL` の `/health` を確認。応答がないプロファイルがあれば、次のような起動コマンドを表示して終了:
    ```
-   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
-   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+   pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+   pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
    ```
 3. Go オーケストレーターをビルド（`.bin/orchestrator`）して起動（`ADDR`、既定 8080）
 4. Vite UI dev server 起動（ポート 5173）
@@ -131,7 +131,7 @@ pwsh scripts/Start-Omni.ps1 [-Follow]
 ADDR=:8080
 
 # DB パス
-DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
+DB_PATH=/path/to/sw25-omni-master/data/omni.db
 
 # シーン画像（MLX の画像工房 mlx-studio-web）。IMAGE_EVERY=0 で無効化
 IMAGES_URL=http://127.0.0.1:11462
@@ -187,7 +187,7 @@ pwsh scripts/Stop-Omni.ps1
 mlx-serve も停止する場合は mlx-serve 側のスクリプトを使います。
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+pwsh ~/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 ```
 
 ---
@@ -606,24 +606,24 @@ uv run ai-agents/generate_scenarios.py \
 uv run ai-agents/generate_scenarios.py \
     --count 2 \
     --rank B \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --publish-quest
 
 # モデルを手動指定
 uv run ai-agents/generate_scenarios.py \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --comfy-model "dreamshaper_8.safetensors" \
     --count 1
 
 # 共通背景を事前生成
 uv run ai-agents/generate_scenarios.py \
     --backgrounds \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 
 # 既存シナリオ（ID=3）に画像を後から追加
 uv run ai-agents/generate_scenarios.py \
     --scenario-id 3 \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 
 # 生成状況を確認
 uv run ai-agents/generate_scenarios.py --status
@@ -639,7 +639,7 @@ uv run ai-agents/generate_scenarios.py \
 ```bash
 # crontab -e に追加
 # 毎日午前2時に Cランクシナリオを2本自動生成
-0 2 * * * cd /Users/kf/AI/SW2.5-Omni-Master && \
+0 2 * * * cd /path/to/sw25-omni-master && \
     uv run ai-agents/generate_scenarios.py \
     --count 2 --rank C --no-images --publish-quest \
     >> logs/generate_scenarios.log 2>&1
@@ -679,15 +679,15 @@ uv sync
 ```bash
 # API サーバー
 ADDR=:8080
-DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
+DB_PATH=/path/to/sw25-omni-master/data/omni.db
 
 # シーン画像（MLX の画像工房 mlx-studio-web）。IMAGE_EVERY=0 で無効化
 IMAGES_URL=http://127.0.0.1:11462
 IMAGE_EVERY=3
-IMAGES_DIR=/Users/kf/AI/SW2.5-Omni-Master/data/images
+IMAGES_DIR=/path/to/sw25-omni-master/data/images
 
 # ComfyUI（ゲーム本体は使わない。generate_scenarios.py は --comfy-url か環境変数 COMFY_URL を読む）
-COMFY_URL=http://192.168.1.10:8188
+COMFY_URL=http://<COMFY_HOST>:8188
 
 # チャットモデル（mlx-serve、GM / NPC / Support / 要約共通）
 LLM_URL=http://127.0.0.1:11441

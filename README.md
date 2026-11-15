@@ -7,7 +7,7 @@
 
 **ソード・ワールド 2.5** 向け、ローカル LLM による完全自律型 AI-TRPG オーケストレーションシステム。
 
-クラウド API を一切使わず、ローカルで動作する 1 つの LLM が GM・NPC・リソース検証を順番に担当し、ルール参照 (RAG) と組み合わせてゲームを自動処理します。LLM は別リポジトリの推論基盤 mlx-serve (`/Users/kf/AI/MLX`) が提供し、Omni-Master 自身は推論プロセスを起動しません。プレイヤーは Web UI から行動を入力するだけで、AI が即座にナラティブを生成してゲームを進行します。
+クラウド API を一切使わず、ローカルで動作する 1 つの LLM が GM・NPC・リソース検証を順番に担当し、ルール参照 (RAG) と組み合わせてゲームを自動処理します。LLM は別リポジトリの推論基盤 mlx-serve (`~/AI/MLX`) が提供し、Omni-Master 自身は推論プロセスを起動しません。プレイヤーは Web UI から行動を入力するだけで、AI が即座にナラティブを生成してゲームを進行します。
 
 ---
 
@@ -72,7 +72,7 @@ API の取り決め (エンドポイント・WebSocket のイベント・型) �
 | ツール | バージョン | 用途 |
 |--------|-----------|------|
 | Mac (Apple Silicon) | — | mlx-serve の実行環境 (想定: Mac mini M5 Pro / 64GB) |
-| mlx-serve (`/Users/kf/AI/MLX`) | — | LLM 推論基盤 (チャット・埋め込み)。使い方は同リポジトリの README を参照 |
+| mlx-serve (`~/AI/MLX`) | — | LLM 推論基盤 (チャット・埋め込み)。使い方は同リポジトリの README を参照 |
 | [Go](https://go.dev/) | `mise.toml` で管理 ([mise](https://mise.jdx.dev/)) | バックエンドのビルド・実行 |
 | [Node.js](https://nodejs.org/) | `ui/package.json` の `volta` で管理 ([Volta](https://volta.sh/)) | フロントエンドの開発サーバー・ビルド |
 | [Python](https://www.python.org/) | 3.14+ | バッチツール |
@@ -91,8 +91,8 @@ API の取り決め (エンドポイント・WebSocket のイベント・型) �
 起動は mlx-serve 側で行います。MLX ダッシュボード (http://127.0.0.1:11470/) から起動するか、スクリプトを使います。チャット用の LLM は同時に 1 本しか常駐できないので、ほかのチャットモデルが動いていれば Gemma に切り替えてください。
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 ```
 
 Gemma プロファイルの起動環境には、プレフィックスキャッシュ (APC) 用に `APC_CHECKPOINT_GUARD_TOKENS=8` と `APC_CHECKPOINT_ENTRIES=4` を設定することを推奨します (理由と設定方法は [docs/mlx-serve-client-notes.md](docs/mlx-serve-client-notes.md))。

@@ -4,7 +4,7 @@
 
 This document describes the shell / PowerShell scripts and Python utilities bundled with the project.
 
-The LLMs (chat and embeddings) are served by mlx-serve (`/Users/kf/AI/MLX`), a separate inference platform. The scripts in this project do not launch any LLM process.
+The LLMs (chat and embeddings) are served by mlx-serve (`~/AI/MLX`), a separate inference platform. The scripts in this project do not launch any LLM process.
 
 ---
 
@@ -110,8 +110,8 @@ All other settings are read from `config.env` (OS environment variable > config.
 1. Exit if `.pids` exists (prevents a double launch; run `Stop-Omni.ps1` first)
 2. Check `/health` of `LLM_URL` and `EMBED_URL`. If a profile is not answering, print the command to start it and exit, e.g.:
    ```
-   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
-   pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+   pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+   pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
    ```
 3. Build the Go orchestrator (`.bin/orchestrator`) and start it (`ADDR`, default 8080)
 4. Start the Vite UI dev server (port 5173)
@@ -131,7 +131,7 @@ All other settings are read from `config.env` (OS environment variable > config.
 ADDR=:8080
 
 # Database path
-DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
+DB_PATH=/path/to/sw25-omni-master/data/omni.db
 
 # Scene images (MLX image studio mlx-studio-web). IMAGE_EVERY=0 disables them
 IMAGES_URL=http://127.0.0.1:11462
@@ -187,7 +187,7 @@ PIDs recorded in `.pids` are also checked and stopped. The `.pids` file is remov
 To stop mlx-serve as well, use mlx-serve's own script:
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+pwsh ~/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 ```
 
 ---
@@ -603,24 +603,24 @@ uv run ai-agents/generate_scenarios.py \
 uv run ai-agents/generate_scenarios.py \
     --count 2 \
     --rank B \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --publish-quest
 
 # Specify model manually
 uv run ai-agents/generate_scenarios.py \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --comfy-model "dreamshaper_8.safetensors" \
     --count 1
 
 # Pre-generate shared backgrounds
 uv run ai-agents/generate_scenarios.py \
     --backgrounds \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 
 # Add images to an existing scenario (ID=3)
 uv run ai-agents/generate_scenarios.py \
     --scenario-id 3 \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 
 # Check generation status
 uv run ai-agents/generate_scenarios.py --status
@@ -636,7 +636,7 @@ uv run ai-agents/generate_scenarios.py \
 ```bash
 # Add to crontab -e
 # Generate 2 rank-C scenarios at 2am every night
-0 2 * * * cd /Users/kf/AI/SW2.5-Omni-Master && \
+0 2 * * * cd /path/to/sw25-omni-master && \
     uv run ai-agents/generate_scenarios.py \
     --count 2 --rank C --no-images --publish-quest \
     >> logs/generate_scenarios.log 2>&1
@@ -676,15 +676,15 @@ Create it from `config.env.example` (`cp config.env.example config.env`). Main k
 ```bash
 # API server
 ADDR=:8080
-DB_PATH=/Users/kf/AI/SW2.5-Omni-Master/data/omni.db
+DB_PATH=/path/to/sw25-omni-master/data/omni.db
 
 # Scene images (MLX image studio mlx-studio-web). IMAGE_EVERY=0 disables them
 IMAGES_URL=http://127.0.0.1:11462
 IMAGE_EVERY=3
-IMAGES_DIR=/Users/kf/AI/SW2.5-Omni-Master/data/images
+IMAGES_DIR=/path/to/sw25-omni-master/data/images
 
 # ComfyUI (not used by the game; generate_scenarios.py reads --comfy-url or the COMFY_URL environment variable)
-COMFY_URL=http://192.168.1.10:8188
+COMFY_URL=http://<COMFY_HOST>:8188
 
 # Chat model (mlx-serve, shared by GM / NPC / Support / summary)
 LLM_URL=http://127.0.0.1:11441

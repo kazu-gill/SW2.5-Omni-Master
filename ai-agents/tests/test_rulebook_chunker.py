@@ -168,14 +168,14 @@ def test_build_chunks_drops_layout_elements():
         "### 人間の戦士\n\n「突撃して敵を倒す。それが、仲間を助けるのさ」戦士は前線で仲間を守る頼もしい存在です。"
         "剣と盾を手に、敵の攻撃を一身に受け止めます。\n\n"
         "**サイドバー**\n- はじめに\n- 第1部\n- 第2部\n\n24\n\n"
-        "### 能力レーダーチャート\n* 攻撃力\n* 防御力\n"
+        "### 能力チャート\n* 腕っぷし\n* 守りの堅さ\n"
     )
     md = TOC_MD + "\n---\n\n## ページ 51\n\n" + body
     texts = [c.text for c in build_chunks(md, skip_pages={3, 4})]
     joined = "\n".join(texts)
     assert "突撃して敵を倒す" in joined
     assert (
-        "サイドバー" not in joined and "第1部" not in joined and "攻撃力" not in joined
+        "サイドバー" not in joined and "第1部" not in joined and "腕っぷし" not in joined
     )
     assert not any(line.strip() == "24" for line in joined.splitlines())
 
@@ -183,12 +183,12 @@ def test_build_chunks_drops_layout_elements():
 def test_is_form_text():
     from rulebook_chunker import is_form_text
 
-    sheet = "先制力: 13\n移動力: 13m\n全移動力: 39m\n基本命中力: 5\n追加ダメージ: 4\n基本回避力: 4"
+    sheet = "先制力: 9\n移動力: 15m\n全力移動: 45m\n命中力: 6\n追加ダメージ: 3\n回避力: 5"
     langs = (
         "エルフは長命な種族で、300歳程度からゆっくりと老い始めます。森の中で暮らすことを好みます。\n"
-        "初期習得言語：エルフ語と交易共通語の会話と読文\n選択不可の技能：なし"
+        "最初に話せる言葉：森の言葉と街の共通語\n覚えられない技能：特になし"
     )
-    listing = "- 先制判定\n- レンジャー運動判定\n- 受け身判定\n- 隠密判定\n- 軽業判定"
+    listing = "- 危険感知判定\n- 探索判定\n- 足跡追跡判定\n- 聞き耳判定\n- 隠密判定"
     assert is_form_text(sheet)
     assert not is_form_text(langs)
     assert not is_form_text(listing)  # 判定の列挙はルール情報なので残す
@@ -218,7 +218,7 @@ def test_is_form_table_keeps_feat_table_with_trailing_empty_columns():
         "| 前提 | なし | 使用 | — |",
         "| :--- | :--- | :--- | :--- |",
         "| 概要 | 誤射を防ぐ | | |",
-        "| 効果 | 習得者は、乱戦エリア内のキャラクターに誤射しません | | |",
+        "| 効果 | 混戦の中でも、狙った相手だけに矢を届けられます | | |",
     ]
     assert not is_form_table(feat)
 
@@ -227,9 +227,9 @@ def test_is_form_table_keeps_continuation_rows_and_merged_cells():
     spell = [
         "| | 消費 | MP5 |",
         "|:---|:---|:---|",
-        "| 効果 | 神による祝福で身体能力を向上させます。 | |",
-        "| | 対象の器用度、敏捷度、筋力、生命力のいずれかを+2します。 | |",
-        "| | この魔法の効果は、例外的に重複します。 | |",
+        "| 効果 | 光の加護で、ひととき感覚を研ぎ澄ませます。 | |",
+        "| | 対象の見張りや探し物に関わる判定に+1します。 | |",
+        "| | 重ねてかけても、効果は大きくなりません。 | |",
     ]
     weapon = [
         "| 武器攻撃分類 | タイプ | サブタイプ |",

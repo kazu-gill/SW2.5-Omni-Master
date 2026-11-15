@@ -8,12 +8,12 @@
 
 ### 1.1 Starting a Session
 
-The LLMs are served by mlx-serve (`/Users/kf/AI/MLX`). Omni-Master's start script does not launch mlx-serve, so start these two profiles first, from the MLX dashboard (http://127.0.0.1:11470/) or with the scripts. Only one chat LLM can be resident at a time, so if another chat model is running, switch to Gemma.
+The LLMs are served by mlx-serve (`~/AI/MLX`). Omni-Master's start script does not launch mlx-serve, so start these two profiles first, from the MLX dashboard (http://127.0.0.1:11470/) or with the scripts. Only one chat LLM can be resident at a time, so if another chat model is running, switch to Gemma.
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/summary
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 embeddings
-pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # check they are up
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/summary
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 embeddings
+pwsh ~/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # check they are up
 ```
 
 - Setting `APC_CHECKPOINT_GUARD_TOKENS=8` and `APC_CHECKPOINT_ENTRIES=4` in the Gemma profile's environment is recommended, so the prefix cache keeps working across stages (details in [mlx-serve-client-notes.md](mlx-serve-client-notes.md))
@@ -23,7 +23,7 @@ Then start Omni-Master (PowerShell 7):
 
 ```bash
 # Run from the project root
-cd /Users/kf/AI/SW2.5-Omni-Master
+cd /path/to/sw25-omni-master
 pwsh scripts/Start-Omni.ps1           # add -Follow to tail the logs
 ```
 
@@ -50,7 +50,7 @@ pwsh scripts/Stop-Omni.ps1
 Identifies the processes listening on the UI port (5173) and the orchestrator port (from `ADDR`), sends SIGTERM, waits 1 second, then sends SIGKILL if needed. Any PIDs left in `.pids` are stopped too and the file is removed. mlx-serve profiles are not stopped. To stop mlx-serve as well:
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+pwsh ~/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 ```
 
 ### 1.3 Viewing Logs
@@ -316,7 +316,7 @@ uv run ai-agents/generate_scenarios.py \
 uv run ai-agents/generate_scenarios.py \
     --count 2 \
     --rank B \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --publish-quest
 ```
 
@@ -324,7 +324,7 @@ The model is auto-detected. To specify manually:
 
 ```bash
 uv run ai-agents/generate_scenarios.py \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --comfy-model "v1-5-pruned-emaonly.safetensors"
 ```
 
@@ -335,7 +335,7 @@ Generates 8 reusable background types (inn, guild, forest, etc.) shared across s
 ```bash
 uv run ai-agents/generate_scenarios.py \
     --backgrounds \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 ```
 
 Output: `data/images/backgrounds/`
@@ -351,7 +351,7 @@ uv run ai-agents/generate_scenarios.py --status
 # Regenerate images for a specific scenario
 uv run ai-agents/generate_scenarios.py \
     --scenario-id 3 \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 ```
 
 ### 5.5 Checking Generation Status
@@ -460,11 +460,11 @@ cd ui && npm run dev -- --host
 # Check mlx-serve
 curl http://127.0.0.1:11441/health    # chat model
 curl http://127.0.0.1:11455/health    # embeddings
-pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1
+pwsh ~/AI/MLX/scripts/Get-MlxServeStatus.ps1
 
 # Start a profile that is down
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 
 # The orchestrator's startup check
 grep mlx-serve logs/orchestrator.log

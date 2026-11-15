@@ -1,6 +1,6 @@
 """mlx_client.py — mlx-serve (OpenAI 互換) を呼ぶバッチツール共通の HTTP ヘルパー。
 
-mlx-serve (/Users/kf/AI/MLX) の注意点:
+mlx-serve (~/AI/MLX) の注意点:
 - mlx-vlm は ``model`` 必須。別の名前を送ると常駐モデルが入れ替わるため、
   プロファイルの model_id を必ず送る
 - seed を送らないと同じ入力に毎回同じ文を返すため、毎回ランダムな seed を送る

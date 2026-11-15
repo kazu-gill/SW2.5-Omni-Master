@@ -5,7 +5,7 @@
     Omni-Master (Go Orchestrator + Vite UI) を起動する。
 
 .DESCRIPTION
-    LLM は mlx-serve (/Users/kf/AI/MLX) が提供する。このスクリプトは mlx-serve を起動しない。
+    LLM は mlx-serve (~/AI/MLX) が提供する。このスクリプトは mlx-serve を起動しない。
     config.env の LLM_URL / EMBED_URL が応答しない場合は、起動すべきプロファイルを表示して終了する。
 
 .PARAMETER Follow
@@ -50,7 +50,7 @@ if ($missing.Count -gt 0) {
     Write-Host ''
     Write-Host '[start] mlx-serve で次のプロファイルを起動してから、もう一度実行してください:'
     foreach ($p in $missing) {
-        Write-Host "  pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile $p"
+        Write-Host "  pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile $p"
     }
     exit 1
 }

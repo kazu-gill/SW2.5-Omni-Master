@@ -109,5 +109,5 @@ func checkMlxServe(baseURL, modelID string) {
 		err = fmt.Errorf("status %d", resp.StatusCode)
 	}
 	log.Printf("warn: mlx-serve %s is not ready at %s (%v)", modelID, baseURL, err)
-	log.Printf("      start it: pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile %s", modelID)
+	log.Printf("      start it: pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile %s", modelID)
 }

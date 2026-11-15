@@ -1,6 +1,6 @@
 # mlx-serve クライアント検証メモ (2026-09-27)
 
-Omni-Master から mlx-serve (`/Users/kf/AI/MLX`) を使うときに確認した挙動。エンジン共通の検証は mlx-serve の `docs/verification-20260925.md` を参照。
+Omni-Master から mlx-serve (`~/AI/MLX`) を使うときに確認した挙動。エンジン共通の検証は mlx-serve の `docs/verification-20260925.md` を参照。
 
 ## 常駐構成
 

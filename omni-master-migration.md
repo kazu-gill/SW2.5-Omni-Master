@@ -1,7 +1,7 @@
 # SW2.5-Omni-Master mlx-serve 移行・単一モデル直列化 計画
 
-- 作業ルート: `/Users/kf/AI/SW2.5-Omni-Master/`
-- LLM 基盤: mlx-serve (`/Users/kf/AI/MLX/`)。Omni-Master はクライアントの 1 つで、推論プロセスを一切起動・管理しない
+- 作業ルート: `/path/to/sw25-omni-master/`
+- LLM 基盤: mlx-serve (`~/AI/MLX/`)。Omni-Master はクライアントの 1 つで、推論プロセスを一切起動・管理しない
 - 作成日: 2026-09-27
 - 後続の計画: MLX 基盤に合わせた再チューニングと UI 改修は [docs/plan-retune-20261112.md](docs/plan-retune-20261112.md)
 
@@ -23,7 +23,7 @@
 ### 目標構成
 
 ```
-mlx-serve (/Users/kf/AI/MLX, 別リポジトリ・変更しない)
+mlx-serve (~/AI/MLX, 別リポジトリ・変更しない)
   ├─ :11441  gemma4-31b-it-heretic-4bit-mtp  ← GM / NPC x3 / Support / バッチツール
   └─ :11455  bge-m3-q8                       ← RAG 埋め込み
 
@@ -149,7 +149,7 @@ func (e *Engine) runStage(ctx, stage string, msgs []llm.Message, opts llm.Comple
 ### Phase 4 — 起動・停止スクリプト
 
 1. `scripts/Start-Omni.ps1` / `scripts/Stop-Omni.ps1` を新しく作る (PowerShell 7、LF、UTF-8 BOM なし)
-   - `config.env` を読み、`LLM_URL` / `EMBED_URL` のヘルスを確認する。未起動なら `pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile <名前>` を**表示して終了**する (mlx-serve を勝手に起動しない)
+   - `config.env` を読み、`LLM_URL` / `EMBED_URL` のヘルスを確認する。未起動なら `pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile <名前>` を**表示して終了**する (mlx-serve を勝手に起動しない)
    - DB がなければ初期化 → Go のビルド・起動 → Vite の起動。PID は今の `.pids` 方式を使う
 2. 新しいスクリプトで Phase 6 の通し実行が通ったら、`start.sh` / `stop.sh` を削除する (削除はユーザーの確認を取ってから)
 

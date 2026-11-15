@@ -8,12 +8,12 @@
 
 ### 1.1 セッション開始
 
-LLM は mlx-serve（`/Users/kf/AI/MLX`）が提供します。Omni-Master の起動スクリプトは mlx-serve を起動しないため、先に次の 2 プロファイルを起動しておきます。MLX ダッシュボード（http://127.0.0.1:11470/）から起動するか、スクリプトを使います。チャット用の LLM は同時に 1 本しか常駐できないので、ほかのチャットモデルが動いていれば Gemma に切り替えます。
+LLM は mlx-serve（`~/AI/MLX`）が提供します。Omni-Master の起動スクリプトは mlx-serve を起動しないため、先に次の 2 プロファイルを起動しておきます。MLX ダッシュボード（http://127.0.0.1:11470/）から起動するか、スクリプトを使います。チャット用の LLM は同時に 1 本しか常駐できないので、ほかのチャットモデルが動いていれば Gemma に切り替えます。
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/要約
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 埋め込み
-pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # 稼働確認
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp   # :11441 GM/NPC/Support/要約
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8                        # :11455 埋め込み
+pwsh ~/AI/MLX/scripts/Get-MlxServeStatus.ps1                                       # 稼働確認
 ```
 
 - Gemma プロファイルの起動環境には `APC_CHECKPOINT_GUARD_TOKENS=8` と `APC_CHECKPOINT_ENTRIES=4` を設定することを推奨します（プレフィックスキャッシュが段の切り替えで効くようにするため。詳細は [mlx-serve-client-notes.md](mlx-serve-client-notes.md)）
@@ -23,7 +23,7 @@ pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1                            
 
 ```bash
 # プロジェクトルートで実行
-cd /Users/kf/AI/SW2.5-Omni-Master
+cd /path/to/sw25-omni-master
 pwsh scripts/Start-Omni.ps1           # ログを追従する場合は -Follow
 ```
 
@@ -50,7 +50,7 @@ pwsh scripts/Stop-Omni.ps1
 UI（:5173）とオーケストレーター（`ADDR` のポート）を LISTEN しているプロセスを特定して SIGTERM → 1秒後に SIGKILL。`.pids` に残った PID も停止し、`.pids` ファイルを削除します。mlx-serve のプロファイルは停止しません。mlx-serve も止める場合:
 
 ```bash
-pwsh /Users/kf/AI/MLX/scripts/Stop-MlxServe.ps1 -All
+pwsh ~/AI/MLX/scripts/Stop-MlxServe.ps1 -All
 ```
 
 ### 1.3 ログ確認
@@ -316,7 +316,7 @@ uv run ai-agents/generate_scenarios.py \
 uv run ai-agents/generate_scenarios.py \
     --count 2 \
     --rank B \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --publish-quest
 ```
 
@@ -324,7 +324,7 @@ uv run ai-agents/generate_scenarios.py \
 
 ```bash
 uv run ai-agents/generate_scenarios.py \
-    --comfy-url http://192.168.1.10:8188 \
+    --comfy-url http://<COMFY_HOST>:8188 \
     --comfy-model "v1-5-pruned-emaonly.safetensors"
 ```
 
@@ -335,7 +335,7 @@ uv run ai-agents/generate_scenarios.py \
 ```bash
 uv run ai-agents/generate_scenarios.py \
     --backgrounds \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 ```
 
 保存先: `data/images/backgrounds/`
@@ -351,7 +351,7 @@ uv run ai-agents/generate_scenarios.py --status
 # ID を指定して画像のみ再生成
 uv run ai-agents/generate_scenarios.py \
     --scenario-id 3 \
-    --comfy-url http://192.168.1.10:8188
+    --comfy-url http://<COMFY_HOST>:8188
 ```
 
 ### 5.5 生成状況確認
@@ -460,11 +460,11 @@ cd ui && npm run dev -- --host
 # mlx-serve の起動状況確認
 curl http://127.0.0.1:11441/health    # チャットモデル
 curl http://127.0.0.1:11455/health    # 埋め込み
-pwsh /Users/kf/AI/MLX/scripts/Get-MlxServeStatus.ps1
+pwsh ~/AI/MLX/scripts/Get-MlxServeStatus.ps1
 
 # 止まっているプロファイルを起動
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
-pwsh /Users/kf/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile gemma4-31b-it-heretic-4bit-mtp
+pwsh ~/AI/MLX/scripts/Start-MlxServe.ps1 -Profile bge-m3-q8
 
 # オーケストレーターの起動時チェック結果
 grep mlx-serve logs/orchestrator.log
